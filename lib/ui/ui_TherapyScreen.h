@@ -39,6 +39,9 @@ extern lv_obj_t *ui_Speed_Group;
 extern lv_obj_t *ui_Speed_Bg;
 extern lv_obj_t *ui_Speed_Num_Bg;
 extern lv_obj_t *ui_Label_Speed;
+extern lv_obj_t *ui_Strength_Value1;
+extern lv_obj_t *ui_Extra_Value1;
+extern lv_obj_t *ui_Extra_Value2;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

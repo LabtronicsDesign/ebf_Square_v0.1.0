@@ -63,6 +63,9 @@
 #define BEEP_AUTOREPEAT_FREQUENCY 1500 // Hz - frequency of auto-repeat beep (lower pitch)
 #define BEEP_AUTOREPEAT_DURATION 30    // ms - duration of auto-repeat beep (shorter)
 
+// UART parameter reporting configuration
+#define PARAM_SETTLE_DELAY 200         // ms - wait time after last change before sending UART message
+
 // BLE UUIDs
 #define SERVICE_UUID "7ece5c94-6705-4551-9704-c8a6b848897f"
 #define CHARACTERISTIC_FREQ_UUID "35b570e4-05b2-4055-8043-7d1346e3f0c3"
@@ -88,9 +91,20 @@ SemaphoreHandle_t serialMutex;
 
 bool standbyStatus, chargeBattStatus, fullBattStatus, bleConnected;
 
+// Global therapy mode variable for screen switching
+bool therapy = false;
+
 // Global battery percentage variable
 float batteryPercentage = 0.0;
 bool max17048Available = false;
+
+// Parameter change tracking for UART reporting
+struct ParameterChangeTracker {
+    bool pending_change;
+    uint32_t last_change_time;
+    uint16_t changed_param_index;
+    bool is_auto_repeating;
+} param_change_tracker = {false, 0, 0, false};
 
 // Volatile variables for ISR communication
 volatile bool button_event_pending = false;
@@ -125,6 +139,7 @@ TFT_eSPI tft = TFT_eSPI( screenWidth, screenHeight ); /* TFT instance */
 void bleStateFunc();
 void chargeStateFunc();
 void onOffSliderFunc();
+void therapyModeFunc();
 void IRAM_ATTR buttonFunc();
 void handleButtonPress(lv_obj_t *btn);
 void handleButtonRelease(lv_obj_t *btn);
@@ -138,6 +153,9 @@ void initializeMAX17048();
 void readBatteryPercentage();
 void playBeep();
 void playAutoRepeatBeep();
+void sendParameterUpdate(uint16_t param_index);
+void checkParameterSettling();
+void notifyParameterChange(uint16_t param_index, bool is_auto_repeat);
 
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
@@ -248,9 +266,9 @@ void taskDisplay(void *pvParameters)
         onOffSliderFunc();
         chargeStateFunc();
         bleStateFunc();
+        therapyModeFunc();
         processButtonEvents();
-        //inputParametersFunc();
-        //outputParametersFunc();
+        checkParameterSettling(); // Check for settled parameter changes
 
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(5));
@@ -439,6 +457,9 @@ void onOffSliderFunc()
             } else {
                 lv_scr_load(ui_MainScreen);
                 debugprintln("Loaded MainScreen");
+                //reset some values
+                therapy = false;
+                bleConnected = false;
             }
             //lv_scr_load_anim(ui_MainScreen, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
         }
@@ -454,6 +475,50 @@ void onOffSliderFunc()
         }
         playBeep();
         prevSS = standbyStatus;
+    }
+}
+
+void therapyModeFunc()
+{
+    static bool prevTherapy = false;
+    
+    // Only act when therapy state changes
+    if (prevTherapy != therapy)
+    {
+        lv_obj_t *current_screen = lv_scr_act();
+        
+        // Only switch screens when on MainScreen or TherapyScreen
+        if (current_screen == ui_MainScreen || current_screen == ui_TherapyScreen)
+        {
+            if (therapy)
+            {
+                // Switch to TherapyScreen
+                debugprintf("Therapy mode activated - switching to TherapyScreen\n");
+                if (ui_TherapyScreen == NULL) {
+                    debugprintln("ui_TherapyScreen is NULL!");
+                } else {
+                    lv_scr_load(ui_TherapyScreen);
+                    debugprintln("Loaded TherapyScreen");
+                }
+            }
+            else
+            {
+                // Switch to MainScreen
+                debugprintf("Therapy mode deactivated - switching to MainScreen\n");
+                if (ui_MainScreen == NULL) {
+                    debugprintln("ui_MainScreen is NULL!");
+                } else {
+                    lv_scr_load(ui_MainScreen);
+                    debugprintln("Loaded MainScreen");
+                }
+            }
+        }
+        else
+        {
+            debugprintf("Therapy mode changed to %s, but not on Main/Therapy screen - no switch performed\n", therapy ? "ON" : "OFF");
+        }
+        playBeep();
+        prevTherapy = therapy;
     }
 }
 
@@ -572,6 +637,9 @@ void taskGPIO(void *pvParametes)
         {
             readBatteryPercentage();
             lastBatteryRead = currentTime;
+            //TEST REmove this
+            // therapy = true;
+            //TEST
         }
 
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -635,6 +703,101 @@ void playAutoRepeatBeep()
     debugprintf("Auto-repeat beep played: %dHz for %dms\n", BEEP_AUTOREPEAT_FREQUENCY, BEEP_AUTOREPEAT_DURATION);
 }
 
+void sendParameterUpdate(uint16_t param_index)
+{
+    const char* param_names[] = {
+        "Settings",     // 0
+        "Strength",     // 1
+        "FreqCycle",    // 2
+        "Frequency",    // 3
+        "Intensity",    // 4
+        "IntervalGap",  // 5
+        "Filter",       // 6
+        "Modulation"    // 7
+    };
+    
+    if (param_index >= sizeof(param_names) / sizeof(param_names[0])) {
+        return; // Invalid parameter index
+    }
+    
+    char uart_message[64];
+    
+    switch (param_index) {
+        case 0: // Settings - no value to send
+            return;
+            
+        case 1: // Strength
+            snprintf(uart_message, sizeof(uart_message), "%s:%d", param_names[param_index], param.strength);
+            break;
+            
+        case 2: // FreqCycle
+            snprintf(uart_message, sizeof(uart_message), "%s:%s", param_names[param_index], param.freq_cycling ? "ON" : "OFF");
+            break;
+            
+        case 3: // Frequency
+            snprintf(uart_message, sizeof(uart_message), "%s:%d", param_names[param_index], param.base_freq);
+            break;
+            
+        case 4: // Intensity
+            snprintf(uart_message, sizeof(uart_message), "%s:%d", param_names[param_index], param.intensity);
+            break;
+            
+        case 5: // IntervalGap
+            snprintf(uart_message, sizeof(uart_message), "%s:%d", param_names[param_index], param.interval_gap);
+            break;
+            
+        case 6: // Filter
+            snprintf(uart_message, sizeof(uart_message), "%s:%s", param_names[param_index], param.filter ? "ON" : "OFF");
+            break;
+            
+        case 7: // Modulation
+            if (param.modulation == 0) {
+                snprintf(uart_message, sizeof(uart_message), "%s:OFF", param_names[param_index]);
+            } else {
+                snprintf(uart_message, sizeof(uart_message), "%s:%d", param_names[param_index], param.modulation);
+            }
+            break;
+            
+        default:
+            return;
+    }
+    
+    // Send over UART1
+    Serial1.println(uart_message);
+    debugprintf("UART1 sent: %s\n", uart_message);
+}
+
+void notifyParameterChange(uint16_t param_index, bool is_auto_repeat)
+{
+    param_change_tracker.pending_change = true;
+    param_change_tracker.last_change_time = millis();
+    param_change_tracker.changed_param_index = param_index;
+    param_change_tracker.is_auto_repeating = is_auto_repeat;
+    
+    // If it's not auto-repeating, send immediately
+    if (!is_auto_repeat) {
+        sendParameterUpdate(param_index);
+        param_change_tracker.pending_change = false;
+    }
+}
+
+void checkParameterSettling()
+{
+    if (!param_change_tracker.pending_change) {
+        return;
+    }
+    
+    uint32_t current_time = millis();
+    uint32_t time_since_change = current_time - param_change_tracker.last_change_time;
+    
+    // Check if enough time has passed since the last change
+    if (time_since_change >= PARAM_SETTLE_DELAY) {
+        sendParameterUpdate(param_change_tracker.changed_param_index);
+        param_change_tracker.pending_change = false;
+        debugprintln("Parameter settled - UART message sent");
+    }
+}
+
 // Simple ISR - just capture button states and exit quickly
 void IRAM_ATTR buttonFunc() {
     uint32_t current_time = millis();
@@ -686,78 +849,135 @@ void adjustParameter(bool increase) {
     if (!ui_Roller_Topic1) return;
     
     uint16_t selected = lv_roller_get_selected(ui_Roller_Topic1);
+    bool param_changed = false;
     
     switch (selected) {
         case 0: // Settings - no parameter to adjust
-            // debugprintln("Settings selected - no parameter to adjust");
+            debugprintln("Settings selected - no parameter to adjust");
             break;
             
         case 1: // Strength (10-100)
             if (increase) {
-                if (param.strength < STRENGTH_MAX) param.strength++;
+                if (param.strength < STRENGTH_MAX) {
+                    param.strength++;
+                    param_changed = true;
+                }
             } else {
-                if (param.strength > STRENGTH_MIN) param.strength--;
+                if (param.strength > STRENGTH_MIN) {
+                    param.strength--;
+                    param_changed = true;
+                }
             }
-            // debugprintf("Strength: %d\n", param.strength);
+            debugprintf("Strength: %d\n", param.strength);
             break;
             
         case 2: // Freq Cycle (0 or 1) - Toggle ON/OFF
             if (increase){
-                if (param.freq_cycling < 1) param.freq_cycling++;
+                if (param.freq_cycling < 1) {
+                    param.freq_cycling++;
+                    param_changed = true;
+                }
             } else {
-                if (param.freq_cycling > 0) param.freq_cycling--;
+                if (param.freq_cycling > 0) {
+                    param.freq_cycling--;
+                    param_changed = true;
+                }
             }
-            // debugprintf("Freq Cycling: %s\n", param.freq_cycling ? "ON" : "OFF");
+            debugprintf("Freq Cycling: %s\n", param.freq_cycling ? "ON" : "OFF");
             break;
             
         case 3: // Frequency (15-350)
             if (increase) {
-                if (param.base_freq < FREQ_MAX) param.base_freq++;
+                if (param.base_freq < FREQ_MAX) {
+                    param.base_freq++;
+                    param_changed = true;
+                }
             } else {
-                if (param.base_freq > FREQ_MIN) param.base_freq--;
+                if (param.base_freq > FREQ_MIN) {
+                    param.base_freq--;
+                    param_changed = true;
+                }
             }
-            // debugprintf("Base Frequency: %d Hz\n", param.base_freq);
+            debugprintf("Base Frequency: %d Hz\n", param.base_freq);
             break;
             
         case 4: // Intensity (1-8)
             if (increase) {
-                if (param.intensity < INTENSITY_MAX) param.intensity++;
+                if (param.intensity < INTENSITY_MAX) {
+                    param.intensity++;
+                    param_changed = true;
+                }
             } else {
-                if (param.intensity > INTENSITY_MIN) param.intensity--;
+                if (param.intensity > INTENSITY_MIN) {
+                    param.intensity--;
+                    param_changed = true;
+                }
             }
-            // debugprintf("Intensity: %d\n", param.intensity);
+            debugprintf("Intensity: %d\n", param.intensity);
             break;
             
         case 5: // Interval Gap (10-80)
             if (increase) {
-                if (param.interval_gap < Z_MAX) param.interval_gap++;
+                if (param.interval_gap < Z_MAX) {
+                    param.interval_gap++;
+                    param_changed = true;
+                }
             } else {
-                if (param.interval_gap > Z_MIN) param.interval_gap--;
+                if (param.interval_gap > Z_MIN) {
+                    param.interval_gap--;
+                    param_changed = true;
+                }
             }
-            // debugprintf("Interval Gap: %d\n", param.interval_gap);
+            debugprintf("Interval Gap: %d\n", param.interval_gap);
             break;
             
         case 6: // Filter (0 or 1) - Toggle ON/OFF
             if (increase){
-                if (param.filter < 1) param.filter++;
+                if (param.filter < 1) {
+                    param.filter++;
+                    param_changed = true;
+                }
             } else {
-                if (param.filter > 0) param.filter--;
+                if (param.filter > 0) {
+                    param.filter--;
+                    param_changed = true;
+                }
             }
-            // debugprintf("Filter: %s\n", param.filter ? "ON" : "OFF");
+            debugprintf("Filter: %s\n", param.filter ? "ON" : "OFF");
             break;
             
         case 7: // Modulation (0-5)
             if (increase) {
-                if (param.modulation < MODULATION_MAX) param.modulation++;
+                if (param.modulation < MODULATION_MAX) {
+                    param.modulation++;
+                    param_changed = true;
+                }
             } else {
-                if (param.modulation > MODULATION_MIN) param.modulation--;
+                if (param.modulation > MODULATION_MIN) {
+                    param.modulation--;
+                    param_changed = true;
+                }
             }
-            // debugprintf("Modulation: %d\n", param.modulation);
+            debugprintf("Modulation: %d\n", param.modulation);
             break;
             
         default:
             debugprintln("Unknown roller selection");
             break;
+    }
+    
+    // Notify parameter change if something actually changed
+    if (param_changed) {
+        // Check if we're in auto-repeat mode by looking at button state
+        bool is_auto_repeat = false;
+        for (int i = 2; i < 4; i++) { // Check BUTTON3 and BUTTON4
+            if (button_states_tracker[i].auto_repeating) {
+                is_auto_repeat = true;
+                break;
+            }
+        }
+        
+        notifyParameterChange(selected, is_auto_repeat);
     }
     
     // Update the display after parameter change
@@ -1056,6 +1276,11 @@ void setup()
     delay(1000);
     playBeep();
     Serial.print("Init...");
+
+    // Initialize UART1 for parameter reporting on pin 18 (TX only)
+    Serial1.begin(115200, SERIAL_8N1, -1, UART_TX_PIN); // RX=-1 (not used), TX=18
+    debugprintln("UART1 initialized on pin 18 for parameter reporting");
+
     Wire.begin(I2C_SDA, I2C_SCL);
     SPI.begin(35, 37, 36, -1); // SCLK, MISO, MOSI, SS
     SPI.setBitOrder(MSBFIRST);
