@@ -57,10 +57,6 @@
 #define CHARACTERISTIC_STR_UUID "41538e4b-1fa3-4215-a23f-f34115487382"
 #define CHARACTERISTIC_INTEN_UUID "ff348571-87df-4ec5-b6d0-2cb248faa18e"
 #define CHARACTERISTIC_BATT_UUID "5f3f6ecd-3f39-45c3-a987-a7cc8725e67c"
-
-SemaphoreHandle_t serialMutex;
-
-
 // BLE Components
 NimBLEServer *bleServer;
 NimBLECharacteristic *pCharFrequency;
@@ -72,17 +68,33 @@ TaskHandle_t taskHandleDisplay;
 TaskHandle_t taskHandleGPIO;
 TaskHandle_t taskHandleBLE;
 
+SemaphoreHandle_t serialMutex;
+
 bool standbyStatus, chargeBattStatus, fullBattStatus, bleConnected;
+
+
+// Volatile variables for ISR communication
+volatile bool button_event_pending = false;
+volatile uint32_t button_states = 0;
+volatile uint32_t button_timestamp = 0;
 
 // Display buffer
 static const uint16_t screenWidth  = 240;
 static const uint16_t screenHeight = 320;
-
 enum { SCREENBUFFER_SIZE_PIXELS = screenWidth * screenHeight / 10 };
 static lv_color_t buf [SCREENBUFFER_SIZE_PIXELS];
-
 TFT_eSPI tft = TFT_eSPI( screenWidth, screenHeight ); /* TFT instance */
 
+void bleStateFunc();
+void chargeStateFunc();
+void onOffSliderFunc();
+void IRAM_ATTR buttonFunc();
+void handleButtonPress(lv_obj_t *btn);
+void handleButtonRelease(lv_obj_t *btn);
+void adjustRoller(lv_obj_t *roller, bool up);
+void IRAM_ATTR buttonFunc();
+void processButtonEvents();
+void setupButtonInterrupts();
 
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
@@ -136,10 +148,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     }
 } serverCallbacks;
 
-void IRAM_ATTR buttonFunc();
-void bleStateFunc();
-void chargeStateFunc();
-void onOffSliderFunc();
+
 
 // Function to initialize LVGL
 void my_disp_flush (lv_display_t *disp, const lv_area_t *area, uint8_t *pixelmap)
@@ -194,7 +203,7 @@ void taskDisplay(void *pvParameters)
         onOffSliderFunc();
         chargeStateFunc();
         bleStateFunc();
-        //buttonFunc();
+        processButtonEvents();
         //inputParametersFunc();
         //outputParametersFunc();
 
@@ -401,14 +410,7 @@ void taskGPIO(void *pvParametes)
     pinMode(ON_OFF_PIN, INPUT);
     pinMode(BATT_CHRG_PIN, INPUT_PULLUP);
     pinMode(BATT_STBY_PIN, INPUT_PULLUP);
-    pinMode(BUTTON1, INPUT);
-    pinMode(BUTTON2, INPUT);
-    pinMode(BUTTON3, INPUT);
-    pinMode(BUTTON4, INPUT);
-    attachInterrupt(BUTTON1, buttonFunc, FALLING);
-    attachInterrupt(BUTTON2, buttonFunc, FALLING);
-    attachInterrupt(BUTTON3, buttonFunc, FALLING);
-    attachInterrupt(BUTTON4, buttonFunc, FALLING);
+    setupButtonInterrupts();
     for (;;)
     {
         // Previous state variables to track changes
@@ -444,86 +446,147 @@ void taskGPIO(void *pvParametes)
     }
 }
 
-void IRAM_ATTR buttonFunc(){
-    static uint32_t lastButtonPress = 0;
-    uint32_t currentTime = millis();
+// Simple ISR - just capture button states and exit quickly
+void IRAM_ATTR buttonFunc() {
+    uint32_t current_time = millis();
+    
+    // Simple debounce - ignore if too soon after last event
+    if (current_time - button_timestamp < 20) return;
+    
+    // Capture all button states in one read
+    button_states = (digitalRead(BUTTON1) << 0) |
+                   (digitalRead(BUTTON2) << 1) |
+                   (digitalRead(BUTTON3) << 2) |
+                   (digitalRead(BUTTON4) << 3);
+    
+    button_timestamp = current_time;
+    button_event_pending = true;  // Signal main loop to process
+}
 
-    // Debounce logic: ignore button presses within 20ms of the last press
-    if (currentTime - lastButtonPress < 20) {
-        return;
-    }
-    lastButtonPress = currentTime;
+// Helper functions (moved out of ISR)
+void handleButtonPress(lv_obj_t *btn) {
+    if (!btn) return;
+    lv_obj_add_state(btn, LV_STATE_PRESSED);
+    lv_obj_send_event(btn, LV_EVENT_PRESSED, NULL);
+}
 
-    // Handle button presses
-    if (digitalRead(BUTTON1) == LOW) {
-        debugprintln("BTN1-P");
-        // Simulate press and release of ButtonLeft1
-        if (ui_ButtonLeft1) {
-            lv_obj_add_state(ui_ButtonLeft1, LV_STATE_PRESSED);
-            lv_obj_send_event(ui_ButtonLeft1, LV_EVENT_PRESSED, NULL);
-            
-            // Schedule release after a short delay
-            lv_timer_t * timer = lv_timer_create([](lv_timer_t * timer) {
-                lv_obj_t *btn = (lv_obj_t*)timer->user_data;
-                lv_obj_remove_state(btn, LV_STATE_PRESSED);
-                lv_obj_send_event(btn, LV_EVENT_RELEASED, NULL);
-                lv_obj_send_event(btn, LV_EVENT_CLICKED, NULL);
-                lv_timer_del(timer);
-            }, 100, ui_ButtonLeft1);
-        }
-    }
-    if (digitalRead(BUTTON2) == LOW) {
-        debugprintln("BTN2-P");
-        // Simulate press and release of ButtonMidLeft1
-        if (ui_ButtonMidLeft1) {
-            lv_obj_add_state(ui_ButtonMidLeft1, LV_STATE_PRESSED);
-            lv_obj_send_event(ui_ButtonMidLeft1, LV_EVENT_PRESSED, NULL);
-            
-            // Schedule release after a short delay
-            lv_timer_t * timer = lv_timer_create([](lv_timer_t * timer) {
-                lv_obj_t *btn = (lv_obj_t*)timer->user_data;
-                lv_obj_remove_state(btn, LV_STATE_PRESSED);
-                lv_obj_send_event(btn, LV_EVENT_RELEASED, NULL);
-                lv_obj_send_event(btn, LV_EVENT_CLICKED, NULL);
-                lv_timer_del(timer);
-            }, 100, ui_ButtonMidLeft1);
-        }
-    }
-    if (digitalRead(BUTTON3) == LOW) {
-        debugprintln("BTN3-P");
-        // Simulate press and release of ButtonMidRight1
-        if (ui_ButtonMidRight1) {
-            lv_obj_add_state(ui_ButtonMidRight1, LV_STATE_PRESSED);
-            lv_obj_send_event(ui_ButtonMidRight1, LV_EVENT_PRESSED, NULL);
-            
-            // Schedule release after a short delay
-            lv_timer_t * timer = lv_timer_create([](lv_timer_t * timer) {
-                lv_obj_t *btn = (lv_obj_t*)timer->user_data;
-                lv_obj_remove_state(btn, LV_STATE_PRESSED);
-                lv_obj_send_event(btn, LV_EVENT_RELEASED, NULL);
-                lv_obj_send_event(btn, LV_EVENT_CLICKED, NULL);
-                lv_timer_del(timer);
-            }, 100, ui_ButtonMidRight1);
-        }
-    }
-    if (digitalRead(BUTTON4) == LOW) {
-        debugprintln("BTN4-P");
-        // Simulate press and release of ButtonRight1
-        if (ui_ButtonRight1) {
-            lv_obj_add_state(ui_ButtonRight1, LV_STATE_PRESSED);
-            lv_obj_send_event(ui_ButtonRight1, LV_EVENT_PRESSED, NULL);
-            
-            // Schedule release after a short delay
-            lv_timer_t * timer = lv_timer_create([](lv_timer_t * timer) {
-                lv_obj_t *btn = (lv_obj_t*)timer->user_data;
-                lv_obj_remove_state(btn, LV_STATE_PRESSED);
-                lv_obj_send_event(btn, LV_EVENT_RELEASED, NULL);
-                lv_obj_send_event(btn, LV_EVENT_CLICKED, NULL);
-                lv_timer_del(timer);
-            }, 100, ui_ButtonRight1);
-        }
+void handleButtonRelease(lv_obj_t *btn) {
+    if (!btn) return;
+    lv_obj_remove_state(btn, LV_STATE_PRESSED);
+    lv_obj_send_event(btn, LV_EVENT_RELEASED, NULL);
+    lv_obj_send_event(btn, LV_EVENT_CLICKED, NULL);
+}
+
+void adjustRoller(lv_obj_t *roller, bool up) {
+    if (!roller) return;
+    
+    uint16_t current = lv_roller_get_selected(roller);
+    uint16_t option_count = lv_roller_get_option_count(roller);
+    
+    if (up) {
+        uint16_t new_selected = (current == 0) ? option_count - 1 : current - 1;
+        lv_roller_set_selected(roller, new_selected, LV_ANIM_ON);
+    } else {
+        uint16_t new_selected = (current + 1) % option_count;
+        lv_roller_set_selected(roller, new_selected, LV_ANIM_ON);
     }
 }
+
+// Process button events in main loop (not ISR)
+void processButtonEvents() {
+    // Check if there's a pending button event
+    if (!button_event_pending) return;
+    
+    // Get current button states (atomic read)
+    uint32_t current_states = button_states;
+    button_event_pending = false;  // Clear the flag
+    
+    // Static variables to track previous states
+    static uint32_t prev_states = 0x0F;  // Initialize as all buttons HIGH (not pressed)
+    static bool first_run = true;
+    
+    if (first_run) {
+        prev_states = current_states;
+        first_run = false;
+        return;
+    }
+    
+    // Get current screen
+    lv_obj_t *current_screen = lv_scr_act();
+    
+    // Button mappings
+    struct {
+        int bit_pos;
+        const char* name;
+        lv_obj_t *main_btn;
+        lv_obj_t *therapy_btn;
+    } buttons[] = {
+        {0, "BTN1", ui_ButtonLeft1, ui_ButtonLeft2},
+        {1, "BTN2", ui_ButtonMidLeft1, ui_ButtonMidLeft2},
+        {2, "BTN3", ui_ButtonMidRight1, ui_ButtonMidRight2},
+        {3, "BTN4", ui_ButtonRight1, ui_ButtonRight2}
+    };
+    
+    // Process each button
+    for (int i = 0; i < 4; i++) {
+        bool prev_state = (prev_states >> buttons[i].bit_pos) & 1;
+        bool curr_state = (current_states >> buttons[i].bit_pos) & 1;
+        
+        // Button press detected (HIGH -> LOW, since buttons are active LOW)
+        if (prev_state == 1 && curr_state == 0) {
+            debugprintf("%s-PRESS on %s\n", buttons[i].name, 
+                       (current_screen == ui_MainScreen) ? "MainScreen" : 
+                       (current_screen == ui_TherapyScreen) ? "TherapyScreen" : "Unknown");
+            
+            if (current_screen == ui_MainScreen) {
+                handleButtonPress(buttons[i].main_btn);
+                
+                // Special roller control for BUTTON1 and BUTTON2
+                if (i == 0) { // BUTTON1 - Roller UP
+                    adjustRoller(ui_Roller_Topic1, true);
+                    debugprintln("Roller UP");
+                } else if (i == 1) { // BUTTON2 - Roller DOWN
+                    adjustRoller(ui_Roller_Topic1, false);
+                    debugprintln("Roller DOWN");
+                }
+                
+            } else if (current_screen == ui_TherapyScreen) {
+                handleButtonPress(buttons[i].therapy_btn);
+            }
+        }
+        
+        // Button release detected (LOW -> HIGH)
+        else if (prev_state == 0 && curr_state == 1) {
+            debugprintf("%s-RELEASE on %s\n", buttons[i].name,
+                       (current_screen == ui_MainScreen) ? "MainScreen" : 
+                       (current_screen == ui_TherapyScreen) ? "TherapyScreen" : "Unknown");
+            
+            if (current_screen == ui_MainScreen) {
+                handleButtonRelease(buttons[i].main_btn);
+            } else if (current_screen == ui_TherapyScreen) {
+                handleButtonRelease(buttons[i].therapy_btn);
+            }
+        }
+    }
+    
+    // Update previous states
+    prev_states = current_states;
+}
+
+// Setup function for button interrupts
+void setupButtonInterrupts() {
+    pinMode(BUTTON1, INPUT_PULLUP);
+    pinMode(BUTTON2, INPUT_PULLUP);
+    pinMode(BUTTON3, INPUT_PULLUP);
+    pinMode(BUTTON4, INPUT_PULLUP);
+    
+    // Attach interrupts on CHANGE
+    attachInterrupt(digitalPinToInterrupt(BUTTON1), buttonFunc, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(BUTTON2), buttonFunc, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(BUTTON3), buttonFunc, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(BUTTON4), buttonFunc, CHANGE);
+}
+
 
 void setup()
 {
@@ -548,7 +611,7 @@ void setup()
     // Initialize TFT display
     xTaskCreatePinnedToCore(
         taskDisplay, "Display",
-        16384, NULL, 3, &taskHandleDisplay,
+        32768, NULL, 3, &taskHandleDisplay,
         ARDUINO_RUNNING_CORE);
 
     Serial.println(" done");
