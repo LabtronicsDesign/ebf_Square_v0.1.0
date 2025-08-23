@@ -16,17 +16,14 @@ extern "C" {
 #include "ui_events.h"
 
 
-///////////////////// SCREENS ////////////////////
-
+///////////////////// SCREENS ////////////////////
 #include "ui_ChargingScreen.h"
 #include "ui_MainScreen.h"
 #include "ui_TherapyScreen.h"
 
-///////////////////// VARIABLES ////////////////////
+///////////////////// VARIABLES ////////////////////
 
-
-// EVENTS
-
+// EVENTS
 extern lv_obj_t *ui____initial_actions0;
 
 // IMAGES AND IMAGE SETS

@@ -1,9 +1,11 @@
 #include "Arduino.h"
+#include <Wire.h>
 #include <SPI.h>
 #include <lvgl.h>           //v9.1.0
-#include "TFT_eSPI.h"       //v2.5.43
+#include <TFT_eSPI.h>      //v2.5.43
 #include <NimBLEDevice.h>
-#include "ui.h"
+#include <ui.h>
+#include <EBF.h>
 
 #define DEBUG
 #ifdef DEBUG
@@ -51,6 +53,10 @@
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 320
 
+// Auto-repeat configuration
+#define AUTO_REPEAT_INITIAL_DELAY 500  // ms before auto-repeat starts
+#define AUTO_REPEAT_INTERVAL 100       // ms between auto-repeats
+
 // BLE UUIDs
 #define SERVICE_UUID "7ece5c94-6705-4551-9704-c8a6b848897f"
 #define CHARACTERISTIC_FREQ_UUID "35b570e4-05b2-4055-8043-7d1346e3f0c3"
@@ -72,11 +78,28 @@ SemaphoreHandle_t serialMutex;
 
 bool standbyStatus, chargeBattStatus, fullBattStatus, bleConnected;
 
-
 // Volatile variables for ISR communication
 volatile bool button_event_pending = false;
 volatile uint32_t button_states = 0;
 volatile uint32_t button_timestamp = 0;
+
+// Button state tracking for auto-repeat
+struct ButtonState {
+    bool is_pressed;
+    uint32_t press_start_time;
+    uint32_t last_repeat_time;
+    bool auto_repeating;
+} button_states_tracker[4] = {0};
+
+parameter_block_t param = {
+    .strength = 50,
+    .freq_cycling = 0,
+    .base_freq = FREQ_DEF,
+    .intensity = INTENSITY_MIN,
+    .interval_gap = Z_DEF,
+    .filter = 0,
+    .modulation = 0
+};
 
 // Display buffer
 static const uint16_t screenWidth  = 240;
@@ -92,9 +115,11 @@ void IRAM_ATTR buttonFunc();
 void handleButtonPress(lv_obj_t *btn);
 void handleButtonRelease(lv_obj_t *btn);
 void adjustRoller(lv_obj_t *roller, bool up);
-void IRAM_ATTR buttonFunc();
+void adjustParameter(bool increase);
+void updateParameterDisplay();
 void processButtonEvents();
 void setupButtonInterrupts();
+void initializeParameterDisplay();
 
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
@@ -197,6 +222,8 @@ void taskDisplay(void *pvParameters)
     lv_tick_set_cb( my_tick_get_cb );
 
     ui_init();
+
+    initializeParameterDisplay();
 
     for (;;)
     {
@@ -492,99 +519,366 @@ void adjustRoller(lv_obj_t *roller, bool up) {
     }
 }
 
+// Adjust parameter based on current roller selection
+void adjustParameter(bool increase) {
+    if (!ui_Roller_Topic1) return;
+    
+    uint16_t selected = lv_roller_get_selected(ui_Roller_Topic1);
+    
+    switch (selected) {
+        case 0: // Settings - no parameter to adjust
+            debugprintln("Settings selected - no parameter to adjust");
+            break;
+            
+        case 1: // Strength (10-100)
+            if (increase) {
+                if (param.strength < STRENGTH_MAX) param.strength++;
+            } else {
+                if (param.strength > STRENGTH_MIN) param.strength--;
+            }
+            debugprintf("Strength: %d\n", param.strength);
+            break;
+            
+        case 2: // Freq Cycle (0 or 1) - Toggle ON/OFF
+            if (increase){
+                if (param.freq_cycling < 1) param.freq_cycling++;
+            } else {
+                if (param.freq_cycling > 0) param.freq_cycling--;
+            }
+            debugprintf("Freq Cycling: %s\n", param.freq_cycling ? "ON" : "OFF");
+            break;
+            
+        case 3: // Frequency (15-350)
+            if (increase) {
+                if (param.base_freq < FREQ_MAX) param.base_freq++;
+            } else {
+                if (param.base_freq > FREQ_MIN) param.base_freq--;
+            }
+            debugprintf("Base Frequency: %d Hz\n", param.base_freq);
+            break;
+            
+        case 4: // Intensity (1-8)
+            if (increase) {
+                if (param.intensity < INTENSITY_MAX) param.intensity++;
+            } else {
+                if (param.intensity > INTENSITY_MIN) param.intensity--;
+            }
+            debugprintf("Intensity: %d\n", param.intensity);
+            break;
+            
+        case 5: // Interval Gap (10-80)
+            if (increase) {
+                if (param.interval_gap < Z_MAX) param.interval_gap++;
+            } else {
+                if (param.interval_gap > Z_MIN) param.interval_gap--;
+            }
+            debugprintf("Interval Gap: %d\n", param.interval_gap);
+            break;
+            
+        case 6: // Filter (0 or 1) - Toggle ON/OFF
+            if (increase){
+                if (param.filter < 1) param.filter++;
+            } else {
+                if (param.filter > 0) param.filter--;
+            }
+            debugprintf("Filter: %s\n", param.filter ? "ON" : "OFF");
+            break;
+            
+        case 7: // Modulation (0-5)
+            if (increase) {
+                if (param.modulation < MODULATION_MAX) param.modulation++;
+            } else {
+                if (param.modulation > MODULATION_MIN) param.modulation--;
+            }
+            debugprintf("Modulation: %d\n", param.modulation);
+            break;
+            
+        default:
+            debugprintln("Unknown roller selection");
+            break;
+    }
+    
+    // Update the display after parameter change
+    updateParameterDisplay();
+}
+
+// Update the display with current parameter values
+void updateParameterDisplay() {
+    if (!ui_Roller_Topic1) return;
+    
+    uint16_t selected = lv_roller_get_selected(ui_Roller_Topic1);
+    char buffer[16];
+    uint16_t arc_value = 0;
+
+    // Update BUTTON3 and BUTTON4 states based on roller selection
+    if (selected == 0) { // Settings selected
+        // Set BUTTON3 and BUTTON4 to User1 state
+        if (ui_ButtonMidRight1) {
+            lv_obj_clear_state(ui_ButtonMidRight1, LV_STATE_USER_2);
+            lv_obj_add_state(ui_ButtonMidRight1, LV_STATE_USER_1);
+            lv_obj_add_state(ui_ButtonMidRight1, LV_STATE_DISABLED);
+        }
+        if (ui_ButtonRight1) {
+            lv_obj_clear_state(ui_ButtonRight1, LV_STATE_USER_2);
+            lv_obj_add_state(ui_ButtonRight1, LV_STATE_USER_1);
+            lv_obj_add_state(ui_ButtonRight1, LV_STATE_DISABLED);
+        }
+    } else { // Any other selection
+        // Set BUTTON3 and BUTTON4 to User2 state
+        if (ui_ButtonMidRight1) {
+            lv_obj_clear_state(ui_ButtonMidRight1, LV_STATE_USER_1);
+            lv_obj_clear_state(ui_ButtonMidRight1, LV_STATE_DISABLED);
+            lv_obj_add_state(ui_ButtonMidRight1, LV_STATE_USER_2);
+        }
+        if (ui_ButtonRight1) {
+            lv_obj_clear_state(ui_ButtonRight1, LV_STATE_USER_1);
+            lv_obj_clear_state(ui_ButtonRight1, LV_STATE_DISABLED);
+            lv_obj_add_state(ui_ButtonRight1, LV_STATE_USER_2);
+        }
+    }
+    
+    // Handle frequency display visibility and content based on roller selection and freq_cycling
+    if (selected == 3) { // Frequency is selected - hide frequency display
+        if (ui_Freq_Text1) lv_obj_add_flag(ui_Freq_Text1, LV_OBJ_FLAG_HIDDEN);
+        if (ui_Freq_Value1) lv_obj_add_flag(ui_Freq_Value1, LV_OBJ_FLAG_HIDDEN);
+    } else { // Other selections - show frequency display
+        if (ui_Freq_Text1) lv_obj_clear_flag(ui_Freq_Text1, LV_OBJ_FLAG_HIDDEN);
+        if (ui_Freq_Value1) lv_obj_clear_flag(ui_Freq_Value1, LV_OBJ_FLAG_HIDDEN);
+        
+        // Update frequency display based on freq_cycling state
+        if (param.freq_cycling) {
+            if (ui_Freq_Value1) lv_label_set_text(ui_Freq_Value1, "Cycle");
+        } else {
+            lv_snprintf(buffer, sizeof(buffer), "%dHz", param.base_freq);
+            if (ui_Freq_Value1) lv_label_set_text(ui_Freq_Value1, buffer);
+        }
+    }
+    
+    switch (selected) {
+        case 0: // Settings
+            if (ui_Label_Value1) lv_label_set_text(ui_Label_Value1, "---");
+            arc_value = 0;
+            break;
+            
+        case 1: // Strength (10-100) -> Arc (0-100)
+            lv_snprintf(buffer, sizeof(buffer), "%d", param.strength);
+            if (ui_Label_Value1) lv_label_set_text(ui_Label_Value1, buffer);
+            arc_value = (param.strength - STRENGTH_MIN) * 100 / (STRENGTH_MAX - STRENGTH_MIN);
+            break;
+            
+        case 2: // Freq Cycle (0 or 1) -> ON/OFF display
+            if (ui_Label_Value1) lv_label_set_text(ui_Label_Value1, param.freq_cycling ? "ON" : "OFF");
+            arc_value = param.freq_cycling ? 100 : 0;
+            break;
+            
+        case 3: // Frequency (15-350) -> Arc (0-100)
+            lv_snprintf(buffer, sizeof(buffer), "%d", param.base_freq);
+            if (ui_Label_Value1) lv_label_set_text(ui_Label_Value1, buffer);
+            // Don't update Freq_Value1 here since it's hidden when frequency is selected
+            arc_value = (param.base_freq - FREQ_MIN) * 100 / (FREQ_MAX - FREQ_MIN);
+            break;
+            
+        case 4: // Intensity (1-8) -> Arc (0-100)
+            lv_snprintf(buffer, sizeof(buffer), "%d", param.intensity);
+            if (ui_Label_Value1) lv_label_set_text(ui_Label_Value1, buffer);
+            arc_value = (param.intensity - INTENSITY_MIN) * 100 / (INTENSITY_MAX - INTENSITY_MIN);
+            break;
+            
+        case 5: // Interval Gap (10-80) -> Arc (0-100)
+            lv_snprintf(buffer, sizeof(buffer), "%d", param.interval_gap);
+            if (ui_Label_Value1) lv_label_set_text(ui_Label_Value1, buffer);
+            arc_value = (param.interval_gap - Z_MIN) * 100 / (Z_MAX - Z_MIN);
+            break;
+            
+        case 6: // Filter (0 or 1) -> ON/OFF display
+            if (ui_Label_Value1) lv_label_set_text(ui_Label_Value1, param.filter ? "ON" : "OFF");
+            arc_value = param.filter ? 100 : 0;
+            break;
+            
+        case 7: // Modulation (0-5) -> Arc (0-100)
+            if(param.modulation == 0){
+                if (ui_Label_Value1) lv_label_set_text(ui_Label_Value1, "OFF");
+            } else {
+                lv_snprintf(buffer, sizeof(buffer), "%d", param.modulation);
+                if (ui_Label_Value1) lv_label_set_text(ui_Label_Value1, buffer);
+            }
+            arc_value = (param.modulation - MODULATION_MIN) * 100 / (MODULATION_MAX - MODULATION_MIN);
+            break;
+            
+        default:
+            if (ui_Label_Value1) lv_label_set_text(ui_Label_Value1, "---");
+            arc_value = 0;
+            break;
+    }
+    
+    // Update the arc with the mapped value (0-100)
+    if (ui_Arc1) {
+        lv_arc_set_value(ui_Arc1, arc_value);
+    }
+    
+    // Debug output
+    debugprintf("Display updated - Selection: %d, Value: %s, Arc: %d%%, Freq_Cycling: %s, BTN3/4: %s\n", 
+               selected, (ui_Label_Value1 ? lv_label_get_text(ui_Label_Value1) : "NULL"), arc_value,
+               param.freq_cycling ? "ON" : "OFF", selected == 0 ? "USER_1" : "USER_2");
+}
+
 // Process button events in main loop (not ISR)
 void processButtonEvents() {
-    // Check if there's a pending button event
-    if (!button_event_pending) return;
+    uint32_t current_time = millis();
     
-    // Get current button states (atomic read)
-    uint32_t current_states = button_states;
-    button_event_pending = false;  // Clear the flag
-    
-    // Static variables to track previous states
-    static uint32_t prev_states = 0x0F;  // Initialize as all buttons HIGH (not pressed)
-    static bool first_run = true;
-    
-    if (first_run) {
-        prev_states = current_states;
-        first_run = false;
-        return;
-    }
-    
-    // Get current screen
-    lv_obj_t *current_screen = lv_scr_act();
-    
-    // Button mappings
-    struct {
-        int bit_pos;
-        const char* name;
-        lv_obj_t *main_btn;
-        lv_obj_t *therapy_btn;
-    } buttons[] = {
-        {0, "BTN1", ui_ButtonLeft1, ui_ButtonLeft2},
-        {1, "BTN2", ui_ButtonMidLeft1, ui_ButtonMidLeft2},
-        {2, "BTN3", ui_ButtonMidRight1, ui_ButtonMidRight2},
-        {3, "BTN4", ui_ButtonRight1, ui_ButtonRight2}
-    };
-    
-    // Process each button
-    for (int i = 0; i < 4; i++) {
-        bool prev_state = (prev_states >> buttons[i].bit_pos) & 1;
-        bool curr_state = (current_states >> buttons[i].bit_pos) & 1;
+    // Check if there's a pending button event from ISR
+    if (button_event_pending) {
+        // Get current button states (atomic read)
+        uint32_t current_states = button_states;
+        button_event_pending = false;  // Clear the flag
         
-        // Button press detected (HIGH -> LOW, since buttons are active LOW)
-        if (prev_state == 1 && curr_state == 0) {
-            debugprintf("%s-PRESS on %s\n", buttons[i].name, 
-                       (current_screen == ui_MainScreen) ? "MainScreen" : 
-                       (current_screen == ui_TherapyScreen) ? "TherapyScreen" : "Unknown");
+        // Static variables to track previous states
+        static uint32_t prev_states = 0x0F;  // Initialize as all buttons HIGH (not pressed)
+        static bool first_run = true;
+        
+        if (first_run) {
+            prev_states = current_states;
+            first_run = false;
+            return;
+        }
+        
+        // Get current screen
+        lv_obj_t *current_screen = lv_scr_act();
+        
+        // Button mappings
+        struct {
+            int bit_pos;
+            const char* name;
+            lv_obj_t *main_btn;
+            lv_obj_t *therapy_btn;
+        } buttons[] = {
+            {0, "BTN1", ui_ButtonLeft1, ui_ButtonLeft2},
+            {1, "BTN2", ui_ButtonMidLeft1, ui_ButtonMidLeft2},
+            {2, "BTN3", ui_ButtonMidRight1, ui_ButtonMidRight2},
+            {3, "BTN4", ui_ButtonRight1, ui_ButtonRight2}
+        };
+        
+        // Process each button
+        for (int i = 0; i < 4; i++) {
+            bool prev_state = (prev_states >> buttons[i].bit_pos) & 1;
+            bool curr_state = (current_states >> buttons[i].bit_pos) & 1;
             
-            if (current_screen == ui_MainScreen) {
-                handleButtonPress(buttons[i].main_btn);
+            // Button press detected (HIGH -> LOW, since buttons are active LOW)
+            if (prev_state == 1 && curr_state == 0) {
+                debugprintf("%s-PRESS on %s\n", buttons[i].name, 
+                           (current_screen == ui_MainScreen) ? "MainScreen" : 
+                           (current_screen == ui_TherapyScreen) ? "TherapyScreen" : "Unknown");
                 
-                // Special roller control for BUTTON1 and BUTTON2
-                if (i == 0) { // BUTTON1 - Roller UP
-                    adjustRoller(ui_Roller_Topic1, true);
-                    debugprintln("Roller UP");
-                } else if (i == 1) { // BUTTON2 - Roller DOWN
-                    adjustRoller(ui_Roller_Topic1, false);
-                    debugprintln("Roller DOWN");
+                // Update button state tracking
+                button_states_tracker[i].is_pressed = true;
+                button_states_tracker[i].press_start_time = current_time;
+                button_states_tracker[i].last_repeat_time = current_time;
+                button_states_tracker[i].auto_repeating = false;
+                
+                if (current_screen == ui_MainScreen) {
+                    handleButtonPress(buttons[i].main_btn);
+                    
+                    // Special controls for MainScreen
+                    if (i == 0) { // BUTTON1 - Roller UP
+                        adjustRoller(ui_Roller_Topic1, true);
+                        updateParameterDisplay(); // Update display after roller change
+                        debugprintln("Roller UP");
+                    } else if (i == 1) { // BUTTON2 - Roller DOWN
+                        adjustRoller(ui_Roller_Topic1, false);
+                        updateParameterDisplay(); // Update display after roller change
+                        debugprintln("Roller DOWN");
+                    } else if (i == 2) { // BUTTON3 - Increase Parameter
+                        adjustParameter(true);
+                        debugprintln("Parameter INCREASE");
+                    } else if (i == 3) { // BUTTON4 - Decrease Parameter
+                        adjustParameter(false);
+                        debugprintln("Parameter DECREASE");
+                    }
+                    
+                } else if (current_screen == ui_TherapyScreen) {
+                    handleButtonPress(buttons[i].therapy_btn);
                 }
+            }
+            
+            // Button release detected (LOW -> HIGH)
+            else if (prev_state == 0 && curr_state == 1) {
+                debugprintf("%s-RELEASE on %s\n", buttons[i].name,
+                           (current_screen == ui_MainScreen) ? "MainScreen" : 
+                           (current_screen == ui_TherapyScreen) ? "TherapyScreen" : "Unknown");
                 
-            } else if (current_screen == ui_TherapyScreen) {
-                handleButtonPress(buttons[i].therapy_btn);
+                // Update button state tracking
+                button_states_tracker[i].is_pressed = false;
+                button_states_tracker[i].auto_repeating = false;
+                
+                if (current_screen == ui_MainScreen) {
+                    handleButtonRelease(buttons[i].main_btn);
+                } else if (current_screen == ui_TherapyScreen) {
+                    handleButtonRelease(buttons[i].therapy_btn);
+                }
             }
         }
         
-        // Button release detected (LOW -> HIGH)
-        else if (prev_state == 0 && curr_state == 1) {
-            debugprintf("%s-RELEASE on %s\n", buttons[i].name,
-                       (current_screen == ui_MainScreen) ? "MainScreen" : 
-                       (current_screen == ui_TherapyScreen) ? "TherapyScreen" : "Unknown");
-            
-            if (current_screen == ui_MainScreen) {
-                handleButtonRelease(buttons[i].main_btn);
-            } else if (current_screen == ui_TherapyScreen) {
-                handleButtonRelease(buttons[i].therapy_btn);
+        // Update previous states
+        prev_states = current_states;
+    }
+    
+    // Handle auto-repeat for BUTTON3 and BUTTON4 (parameter adjustment buttons)
+    lv_obj_t *current_screen = lv_scr_act();
+    if (current_screen == ui_MainScreen) {
+        // Check if we're not on Settings (which has no adjustable parameters)
+        uint16_t selected = ui_Roller_Topic1 ? lv_roller_get_selected(ui_Roller_Topic1) : 0;
+        if (selected != 0) { // Not on Settings
+            for (int i = 2; i < 4; i++) { // Only BUTTON3 and BUTTON4
+                if (button_states_tracker[i].is_pressed) {
+                    uint32_t hold_duration = current_time - button_states_tracker[i].press_start_time;
+                    
+                    // Check if we should start auto-repeat
+                    if (!button_states_tracker[i].auto_repeating && hold_duration >= AUTO_REPEAT_INITIAL_DELAY) {
+                        button_states_tracker[i].auto_repeating = true;
+                        button_states_tracker[i].last_repeat_time = current_time;
+                        debugprintf("Auto-repeat started for BTN%d\n", i + 1);
+                    }
+                    
+                    // Process auto-repeat
+                    if (button_states_tracker[i].auto_repeating) {
+                        uint32_t time_since_last_repeat = current_time - button_states_tracker[i].last_repeat_time;
+                        
+                        if (time_since_last_repeat >= AUTO_REPEAT_INTERVAL) {
+                            button_states_tracker[i].last_repeat_time = current_time;
+                            
+                            if (i == 2) { // BUTTON3 - Increase Parameter
+                                adjustParameter(true);
+                                debugprintln("Parameter INCREASE (auto-repeat)");
+                            } else if (i == 3) { // BUTTON4 - Decrease Parameter
+                                adjustParameter(false);
+                                debugprintln("Parameter DECREASE (auto-repeat)");
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    
-    // Update previous states
-    prev_states = current_states;
 }
 
 // Setup function for button interrupts
 void setupButtonInterrupts() {
-    pinMode(BUTTON1, INPUT_PULLUP);
-    pinMode(BUTTON2, INPUT_PULLUP);
-    pinMode(BUTTON3, INPUT_PULLUP);
-    pinMode(BUTTON4, INPUT_PULLUP);
+    pinMode(BUTTON1, INPUT);
+    pinMode(BUTTON2, INPUT);
+    pinMode(BUTTON3, INPUT);
+    pinMode(BUTTON4, INPUT);
     
     // Attach interrupts on CHANGE
-    attachInterrupt(digitalPinToInterrupt(BUTTON1), buttonFunc, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(BUTTON2), buttonFunc, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(BUTTON3), buttonFunc, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(BUTTON4), buttonFunc, CHANGE);
+    attachInterrupt(BUTTON1, buttonFunc, CHANGE);
+    attachInterrupt(BUTTON2, buttonFunc, CHANGE);
+    attachInterrupt(BUTTON3, buttonFunc, CHANGE);
+    attachInterrupt(BUTTON4, buttonFunc, CHANGE);
+}
+
+// Initialize parameter display (call this after UI initialization)
+void initializeParameterDisplay() {
+    updateParameterDisplay();
+    debugprintln("Parameter display initialized");
 }
 
 
@@ -593,6 +887,7 @@ void setup()
     Serial.begin(115200);
     delay(2000);
     Serial.print("Init...");
+    Wire.begin(I2C_SDA, I2C_SCL);
     SPI.begin(35, 37, 36, -1); // SCLK, MISO, MOSI, SS
     SPI.setBitOrder(MSBFIRST);
     SPI.setDataMode(SPI_MODE0);
@@ -611,7 +906,7 @@ void setup()
     // Initialize TFT display
     xTaskCreatePinnedToCore(
         taskDisplay, "Display",
-        32768, NULL, 3, &taskHandleDisplay,
+        16384, NULL, 3, &taskHandleDisplay,
         ARDUINO_RUNNING_CORE);
 
     Serial.println(" done");
