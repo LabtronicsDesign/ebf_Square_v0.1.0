@@ -6,6 +6,7 @@
 #include <NimBLEDevice.h>
 #include <ui.h>
 #include <EBF.h>
+#include <SparkFun_MAX1704x_Fuel_Gauge_Arduino_Library.h>
 
 #define DEBUG
 #ifdef DEBUG
@@ -24,10 +25,6 @@
 #else
 #define ARDUINO_RUNNING_CORE 1
 #endif
-
-// Peripheral Addresses
-#define TCA9534A_ADDR 0x38
-#define PCA9685_ADDR 0x40
 
 // Pin Definitions (aligned with schematic)
 #define BATT_CHRG_PIN 1
@@ -57,12 +54,25 @@
 #define AUTO_REPEAT_INITIAL_DELAY 500  // ms before auto-repeat starts
 #define AUTO_REPEAT_INTERVAL 100       // ms between auto-repeats
 
+// Battery reading interval
+#define BATTERY_READ_INTERVAL 5000     // Read battery every 5 seconds
+
+// Piezo beep configuration
+#define BEEP_FREQUENCY 2000            // Hz - frequency of beep
+#define BEEP_DURATION 50               // ms - duration of beep
+#define BEEP_AUTOREPEAT_FREQUENCY 1500 // Hz - frequency of auto-repeat beep (lower pitch)
+#define BEEP_AUTOREPEAT_DURATION 30    // ms - duration of auto-repeat beep (shorter)
+
 // BLE UUIDs
 #define SERVICE_UUID "7ece5c94-6705-4551-9704-c8a6b848897f"
 #define CHARACTERISTIC_FREQ_UUID "35b570e4-05b2-4055-8043-7d1346e3f0c3"
 #define CHARACTERISTIC_STR_UUID "41538e4b-1fa3-4215-a23f-f34115487382"
 #define CHARACTERISTIC_INTEN_UUID "ff348571-87df-4ec5-b6d0-2cb248faa18e"
 #define CHARACTERISTIC_BATT_UUID "5f3f6ecd-3f39-45c3-a987-a7cc8725e67c"
+
+// MAX17048 fuel gauge
+SFE_MAX1704X lipo(MAX1704X_MAX17048);
+
 // BLE Components
 NimBLEServer *bleServer;
 NimBLECharacteristic *pCharFrequency;
@@ -77,6 +87,10 @@ TaskHandle_t taskHandleBLE;
 SemaphoreHandle_t serialMutex;
 
 bool standbyStatus, chargeBattStatus, fullBattStatus, bleConnected;
+
+// Global battery percentage variable
+float batteryPercentage = 0.0;
+bool max17048Available = false;
 
 // Volatile variables for ISR communication
 volatile bool button_event_pending = false;
@@ -120,6 +134,10 @@ void updateParameterDisplay();
 void processButtonEvents();
 void setupButtonInterrupts();
 void initializeParameterDisplay();
+void initializeMAX17048();
+void readBatteryPercentage();
+void playBeep();
+void playAutoRepeatBeep();
 
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
@@ -256,6 +274,7 @@ void bleStateFunc()
             lv_obj_add_flag(ui_BT_Icon1, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(ui_BT_Icon2, LV_OBJ_FLAG_HIDDEN);
         }
+        playBeep();
     }
     prev_ble_state = current_ble_state;
 }
@@ -266,76 +285,146 @@ void chargeStateFunc()
     static bool prev_charging = false;
     static bool prev_full = false;
     static int prev_battery_state = -1; // -1: initial, 0: normal, 1: charging, 2: full
+    static float prev_battery_percentage = -1.0;
 
     // Get current state
     bool charging = chargeBattStatus && !fullBattStatus;
     bool full = !chargeBattStatus && fullBattStatus;
     int current_battery_state;
+    int battery_icon_state = 0; // 0: low (0-30%), 1: medium (31-80%), 2: high (81-100%), 3: charging/full
 
-    // Determine the current state
+    // Determine the current charging state
     if (charging)
     {
         current_battery_state = 1; // charging
+        battery_icon_state = 3; // USER_4 state for charging
     }
     else if (full)
     {
         current_battery_state = 2; // full
+        battery_icon_state = 3; // USER_4 state for full
     }
     else
     {
         current_battery_state = 0; // normal
-    }
-
-    // Only update the UI if the state has changed
-    if (current_battery_state != prev_battery_state)
-    {
-        // Debug message for state change
-        debugprintf("Battery state changed: %d -> %d\n", prev_battery_state, current_battery_state);
-
-        // Update battery icons based on current state
-        if (charging)
+        // Determine icon state based on battery percentage
+        if (batteryPercentage <= 30.0)
         {
-            lv_obj_clear_state(ui_Batt_Icon1, LV_STATE_USER_1);
-            lv_obj_clear_state(ui_Batt_Icon1, LV_STATE_USER_2);
-            lv_obj_clear_state(ui_Batt_Icon1, LV_STATE_USER_3);
-            lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_4);
-            lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_1);
-            lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_2);
-            lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_3);
-            lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_4);
+            battery_icon_state = 0; // USER_1 state (0-30%)
         }
-        else if (full)
+        else if (batteryPercentage <= 80.0)
         {
-            lv_obj_clear_state(ui_Batt_Icon1, LV_STATE_USER_1);
-            lv_obj_clear_state(ui_Batt_Icon1, LV_STATE_USER_2);
-            lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_3);
-            lv_obj_clear_state(ui_Batt_Icon1, LV_STATE_USER_4);
-            lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_1);
-            lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_2);
-            lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_3);
-            lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_4);
+            battery_icon_state = 1; // USER_2 state (31-80%)
         }
         else
         {
+            battery_icon_state = 2; // USER_3 state (81-100%)
+        }
+    }
+
+    // Check if any values have changed
+    bool state_changed = (current_battery_state != prev_battery_state) || 
+                        (abs(batteryPercentage - prev_battery_percentage) >= 1.0); // Update if percentage changes by 1% or more
+
+    if (state_changed)
+    {
+        // Debug message for state change
+        debugprintf("Battery state changed: State: %d->%d, Percentage: %.1f%%->%.1f%%, Icon: %d\n", 
+                   prev_battery_state, current_battery_state, 
+                   prev_battery_percentage, batteryPercentage, battery_icon_state);
+
+        // Handle battery text visibility and content based on charging/full state
+        if (charging || full)
+        {
+            // Hide battery percentage text when charging or full
+            if (ui_Header_Battery1)
+            {
+                lv_obj_add_flag(ui_Header_Battery1, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (ui_Header_Battery2)
+            {
+                lv_obj_add_flag(ui_Header_Battery2, LV_OBJ_FLAG_HIDDEN);
+            }
+            debugprintln("Battery text hidden - charging/full state");
+        }
+        else
+        {
+            // Show and update battery percentage text when not charging/full
+            if (ui_Header_Battery1)
+            {
+                lv_obj_clear_flag(ui_Header_Battery1, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (ui_Header_Battery2)
+            {
+                lv_obj_clear_flag(ui_Header_Battery2, LV_OBJ_FLAG_HIDDEN);
+            }
+            
+            // Update battery percentage display
+            char battery_text[8];
+            if (max17048Available)
+            {
+                snprintf(battery_text, sizeof(battery_text), "%.0f%%", batteryPercentage);
+            }
+            else
+            {
+                strcpy(battery_text, "---%");
+            }
+            
+            if (ui_Header_Battery1)
+            {
+                lv_label_set_text(ui_Header_Battery1, battery_text);
+            }
+            if (ui_Header_Battery2)
+            {
+                lv_label_set_text(ui_Header_Battery2, battery_text);
+            }
+            debugprintf("Battery text shown: %s\n", battery_text);
+        }
+
+        // Clear all states first
+        if (ui_Batt_Icon1)
+        {
             lv_obj_clear_state(ui_Batt_Icon1, LV_STATE_USER_1);
-            lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_2);
+            lv_obj_clear_state(ui_Batt_Icon1, LV_STATE_USER_2);
             lv_obj_clear_state(ui_Batt_Icon1, LV_STATE_USER_3);
             lv_obj_clear_state(ui_Batt_Icon1, LV_STATE_USER_4);
+        }
+        if (ui_Batt_Icon2)
+        {
             lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_1);
-            lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_2);
+            lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_2);
             lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_3);
             lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_4);
         }
-        /* //normal
-        else{
-        }
-        */
-        // Update previous state
-        prev_battery_state = current_battery_state;
 
-        //update batt SoC
+        // Set the appropriate state based on battery_icon_state
+        switch (battery_icon_state)
+        {
+            case 0: // Low battery (0-30%) - USER_1
+                if (ui_Batt_Icon1) lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_1);
+                if (ui_Batt_Icon2) lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_1);
+                break;
+            case 1: // Medium battery (31-80%) - USER_2
+                if (ui_Batt_Icon1) lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_2);
+                if (ui_Batt_Icon2) lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_2);
+                break;
+            case 2: // High battery (81-100%) - USER_3
+                if (ui_Batt_Icon1) lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_3);
+                if (ui_Batt_Icon2) lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_3);
+                break;
+            case 3: // Charging/Full - USER_4
+                if (ui_Batt_Icon1) lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_4);
+                if (ui_Batt_Icon2) lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_4);
+                break;
+        }
+
+        // Update previous state variables
+        playBeep();
+        prev_battery_state = current_battery_state;
+        prev_battery_percentage = batteryPercentage;
     }
 }
+
 
 void onOffSliderFunc()
 {
@@ -363,6 +452,7 @@ void onOffSliderFunc()
                 debugprintln("Loaded ChargingScreen");
             }
         }
+        playBeep();
         prevSS = standbyStatus;
     }
 }
@@ -438,6 +528,12 @@ void taskGPIO(void *pvParametes)
     pinMode(BATT_CHRG_PIN, INPUT_PULLUP);
     pinMode(BATT_STBY_PIN, INPUT_PULLUP);
     setupButtonInterrupts();
+
+    // Initialize MAX17048
+    initializeMAX17048();
+
+    uint32_t lastBatteryRead = 0;
+
     for (;;)
     {
         // Previous state variables to track changes
@@ -469,8 +565,74 @@ void taskGPIO(void *pvParametes)
         standbyStatus = currentStandbyStatus;
         chargeBattStatus = currentChargeBattStatus;
         fullBattStatus = currentFullBattStatus;
+
+        // Read battery percentage periodically
+        uint32_t currentTime = millis();
+        if (currentTime - lastBatteryRead >= BATTERY_READ_INTERVAL)
+        {
+            readBatteryPercentage();
+            lastBatteryRead = currentTime;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(20));
     }
+}
+
+void initializeMAX17048()
+{
+    debugprintln("Initializing MAX17048...");
+    
+    // Try to initialize the MAX17048
+    if (lipo.begin() == false)
+    {
+        debugprintln("MAX17048 not detected. Please check wiring. Battery percentage will show as ---");
+        max17048Available = false;
+        batteryPercentage = 0.0;
+        return;
+    }
+
+    debugprintln("MAX17048 detected successfully!");
+    max17048Available = true;
+    
+    // Quick start - forces the IC to restart fuel-gauge calculations
+    lipo.quickStart();
+    
+    // Initial battery reading
+    readBatteryPercentage();
+    
+    debugprintf("Initial battery percentage: %.2f%%\n", batteryPercentage);
+}
+
+void readBatteryPercentage()
+{
+    if (!max17048Available)
+    {
+        return;
+    }
+    
+    // Read battery percentage from MAX17048
+    float newPercentage = lipo.getSOC();
+    
+    // Basic validation - percentage should be between 0 and 100
+    if (newPercentage >= 0.0 && newPercentage <= 100.0)
+    {
+        batteryPercentage = newPercentage;
+        // debugprintf("Battery: %.2f%% (%.2fV)\n", batteryPercentage, lipo.getVoltage());
+    }
+}
+
+void playBeep()
+{
+    // Generate a short beep on the piezo
+    tone(PIEZO_PIN, BEEP_FREQUENCY, BEEP_DURATION);
+    debugprintf("Beep played: %dHz for %dms\n", BEEP_FREQUENCY, BEEP_DURATION);
+}
+
+void playAutoRepeatBeep()
+{
+    // Generate a shorter, lower-pitched beep for auto-repeat
+    tone(PIEZO_PIN, BEEP_AUTOREPEAT_FREQUENCY, BEEP_AUTOREPEAT_DURATION);
+    debugprintf("Auto-repeat beep played: %dHz for %dms\n", BEEP_AUTOREPEAT_FREQUENCY, BEEP_AUTOREPEAT_DURATION);
 }
 
 // Simple ISR - just capture button states and exit quickly
@@ -527,7 +689,7 @@ void adjustParameter(bool increase) {
     
     switch (selected) {
         case 0: // Settings - no parameter to adjust
-            debugprintln("Settings selected - no parameter to adjust");
+            // debugprintln("Settings selected - no parameter to adjust");
             break;
             
         case 1: // Strength (10-100)
@@ -536,7 +698,7 @@ void adjustParameter(bool increase) {
             } else {
                 if (param.strength > STRENGTH_MIN) param.strength--;
             }
-            debugprintf("Strength: %d\n", param.strength);
+            // debugprintf("Strength: %d\n", param.strength);
             break;
             
         case 2: // Freq Cycle (0 or 1) - Toggle ON/OFF
@@ -545,7 +707,7 @@ void adjustParameter(bool increase) {
             } else {
                 if (param.freq_cycling > 0) param.freq_cycling--;
             }
-            debugprintf("Freq Cycling: %s\n", param.freq_cycling ? "ON" : "OFF");
+            // debugprintf("Freq Cycling: %s\n", param.freq_cycling ? "ON" : "OFF");
             break;
             
         case 3: // Frequency (15-350)
@@ -554,7 +716,7 @@ void adjustParameter(bool increase) {
             } else {
                 if (param.base_freq > FREQ_MIN) param.base_freq--;
             }
-            debugprintf("Base Frequency: %d Hz\n", param.base_freq);
+            // debugprintf("Base Frequency: %d Hz\n", param.base_freq);
             break;
             
         case 4: // Intensity (1-8)
@@ -563,7 +725,7 @@ void adjustParameter(bool increase) {
             } else {
                 if (param.intensity > INTENSITY_MIN) param.intensity--;
             }
-            debugprintf("Intensity: %d\n", param.intensity);
+            // debugprintf("Intensity: %d\n", param.intensity);
             break;
             
         case 5: // Interval Gap (10-80)
@@ -572,7 +734,7 @@ void adjustParameter(bool increase) {
             } else {
                 if (param.interval_gap > Z_MIN) param.interval_gap--;
             }
-            debugprintf("Interval Gap: %d\n", param.interval_gap);
+            // debugprintf("Interval Gap: %d\n", param.interval_gap);
             break;
             
         case 6: // Filter (0 or 1) - Toggle ON/OFF
@@ -581,7 +743,7 @@ void adjustParameter(bool increase) {
             } else {
                 if (param.filter > 0) param.filter--;
             }
-            debugprintf("Filter: %s\n", param.filter ? "ON" : "OFF");
+            // debugprintf("Filter: %s\n", param.filter ? "ON" : "OFF");
             break;
             
         case 7: // Modulation (0-5)
@@ -590,7 +752,7 @@ void adjustParameter(bool increase) {
             } else {
                 if (param.modulation > MODULATION_MIN) param.modulation--;
             }
-            debugprintf("Modulation: %d\n", param.modulation);
+            // debugprintf("Modulation: %d\n", param.modulation);
             break;
             
         default:
@@ -717,9 +879,9 @@ void updateParameterDisplay() {
     }
     
     // Debug output
-    debugprintf("Display updated - Selection: %d, Value: %s, Arc: %d%%, Freq_Cycling: %s, BTN3/4: %s\n", 
-               selected, (ui_Label_Value1 ? lv_label_get_text(ui_Label_Value1) : "NULL"), arc_value,
-               param.freq_cycling ? "ON" : "OFF", selected == 0 ? "USER_1" : "USER_2");
+    // debugprintf("Display updated - Selection: %d, Value: %s, Arc: %d%%, Freq_Cycling: %s, BTN3/4: %s\n", 
+            //    selected, (ui_Label_Value1 ? lv_label_get_text(ui_Label_Value1) : "NULL"), arc_value,
+            //    param.freq_cycling ? "ON" : "OFF", selected == 0 ? "USER_1" : "USER_2");
 }
 
 // Process button events in main loop (not ISR)
@@ -768,6 +930,9 @@ void processButtonEvents() {
                 debugprintf("%s-PRESS on %s\n", buttons[i].name, 
                            (current_screen == ui_MainScreen) ? "MainScreen" : 
                            (current_screen == ui_TherapyScreen) ? "TherapyScreen" : "Unknown");
+
+                // Play beep for successful button press
+                playBeep();
                 
                 // Update button state tracking
                 button_states_tracker[i].is_pressed = true;
@@ -782,17 +947,17 @@ void processButtonEvents() {
                     if (i == 0) { // BUTTON1 - Roller UP
                         adjustRoller(ui_Roller_Topic1, true);
                         updateParameterDisplay(); // Update display after roller change
-                        debugprintln("Roller UP");
+                        // debugprintln("Roller UP");
                     } else if (i == 1) { // BUTTON2 - Roller DOWN
                         adjustRoller(ui_Roller_Topic1, false);
                         updateParameterDisplay(); // Update display after roller change
-                        debugprintln("Roller DOWN");
+                        // debugprintln("Roller DOWN");
                     } else if (i == 2) { // BUTTON3 - Increase Parameter
                         adjustParameter(true);
-                        debugprintln("Parameter INCREASE");
+                        // debugprintln("Parameter INCREASE");
                     } else if (i == 3) { // BUTTON4 - Decrease Parameter
                         adjustParameter(false);
-                        debugprintln("Parameter DECREASE");
+                        // debugprintln("Parameter DECREASE");
                     }
                     
                 } else if (current_screen == ui_TherapyScreen) {
@@ -802,9 +967,9 @@ void processButtonEvents() {
             
             // Button release detected (LOW -> HIGH)
             else if (prev_state == 0 && curr_state == 1) {
-                debugprintf("%s-RELEASE on %s\n", buttons[i].name,
-                           (current_screen == ui_MainScreen) ? "MainScreen" : 
-                           (current_screen == ui_TherapyScreen) ? "TherapyScreen" : "Unknown");
+                // debugprintf("%s-RELEASE on %s\n", buttons[i].name,
+                //            (current_screen == ui_MainScreen) ? "MainScreen" : 
+                //            (current_screen == ui_TherapyScreen) ? "TherapyScreen" : "Unknown");
                 
                 // Update button state tracking
                 button_states_tracker[i].is_pressed = false;
@@ -836,7 +1001,7 @@ void processButtonEvents() {
                     if (!button_states_tracker[i].auto_repeating && hold_duration >= AUTO_REPEAT_INITIAL_DELAY) {
                         button_states_tracker[i].auto_repeating = true;
                         button_states_tracker[i].last_repeat_time = current_time;
-                        debugprintf("Auto-repeat started for BTN%d\n", i + 1);
+                        // debugprintf("Auto-repeat started for BTN%d\n", i + 1);
                     }
                     
                     // Process auto-repeat
@@ -845,13 +1010,16 @@ void processButtonEvents() {
                         
                         if (time_since_last_repeat >= AUTO_REPEAT_INTERVAL) {
                             button_states_tracker[i].last_repeat_time = current_time;
+
+                            // Play auto-repeat beep
+                            playAutoRepeatBeep();
                             
                             if (i == 2) { // BUTTON3 - Increase Parameter
                                 adjustParameter(true);
-                                debugprintln("Parameter INCREASE (auto-repeat)");
+                                // debugprintln("Parameter INCREASE (auto-repeat)");
                             } else if (i == 3) { // BUTTON4 - Decrease Parameter
                                 adjustParameter(false);
-                                debugprintln("Parameter DECREASE (auto-repeat)");
+                                // debugprintln("Parameter DECREASE (auto-repeat)");
                             }
                         }
                     }
@@ -885,7 +1053,8 @@ void initializeParameterDisplay() {
 void setup()
 {
     Serial.begin(115200);
-    delay(2000);
+    delay(1000);
+    playBeep();
     Serial.print("Init...");
     Wire.begin(I2C_SDA, I2C_SCL);
     SPI.begin(35, 37, 36, -1); // SCLK, MISO, MOSI, SS
@@ -896,7 +1065,7 @@ void setup()
     // Initialize GPIO
     xTaskCreate(
         taskGPIO, "GPIO",
-        2048, NULL, 2, &taskHandleGPIO);
+        4096, NULL, 2, &taskHandleGPIO);
 
     // Initialize BLE
     xTaskCreate(
@@ -908,7 +1077,8 @@ void setup()
         taskDisplay, "Display",
         16384, NULL, 3, &taskHandleDisplay,
         ARDUINO_RUNNING_CORE);
-
+    
+    playBeep();
     Serial.println(" done");
 }
 
