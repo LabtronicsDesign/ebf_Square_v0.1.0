@@ -39,8 +39,8 @@
 #define BL_CTRL_PIN 12
 #define SCREEN_RD_PIN 13
 #define SCREEN_WR_PIN 14
-#define UART_RX_PIN 17
-#define UART_TX_PIN 18
+#define UART_RX_PIN 18
+#define UART_TX_PIN 17
 #define PIEZO_PIN 21
 #define SCREEN_RST_PIN 33
 #define SCREEN_CS_PIN 34
@@ -86,6 +86,7 @@ NimBLECharacteristic *pCharBattery;
 TaskHandle_t taskHandleDisplay;
 TaskHandle_t taskHandleGPIO;
 TaskHandle_t taskHandleBLE;
+TaskHandle_t taskHandleComm;
 
 SemaphoreHandle_t serialMutex;
 
@@ -93,6 +94,9 @@ bool standbyStatus, chargeBattStatus, fullBattStatus, bleConnected;
 
 // Global therapy mode variable for screen switching
 bool therapy = false;
+
+int this_width, initial_width, delta_width, response, local_rings;
+int seconds, skin_display, dose, no_info;
 
 // Global battery percentage variable
 float batteryPercentage = 0.0;
@@ -136,6 +140,7 @@ enum { SCREENBUFFER_SIZE_PIXELS = screenWidth * screenHeight / 10 };
 static lv_color_t buf [SCREENBUFFER_SIZE_PIXELS];
 TFT_eSPI tft = TFT_eSPI( screenWidth, screenHeight ); /* TFT instance */
 
+void processIncomingUART();
 void bleStateFunc();
 void chargeStateFunc();
 void onOffSliderFunc();
@@ -156,6 +161,12 @@ void playAutoRepeatBeep();
 void sendParameterUpdate(uint16_t param_index);
 void checkParameterSettling();
 void notifyParameterChange(uint16_t param_index, bool is_auto_repeat);
+void beep(int duration);
+void beepLow(int duration);
+void beepPeriodic(int duration, int period);
+void endBeep(int duration);
+void audioWarble(int times);
+void audioPipNTimes(int times);
 
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
@@ -268,12 +279,158 @@ void taskDisplay(void *pvParameters)
         bleStateFunc();
         therapyModeFunc();
         processButtonEvents();
-        checkParameterSettling(); // Check for settled parameter changes
 
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
+
+// Function to parse comma-separated beep commands
+void processBeepCommand(const String& command, int param1, int param2, int param3)
+{
+    if (command == "Beep")
+    {
+        beep(param1);
+        debugprintf("Beep: duration=%d\n", param1);
+    }
+    else if (command == "BeepLow")
+    {
+        beepLow(param1);
+        debugprintf("BeepLow: duration=%d\n", param1);
+    }
+    else if (command == "BeepPeriod")
+    {
+        beepPeriodic(param1, param2);
+        debugprintf("BeepPeriod: duration=%d, period=%d\n", param1, param2);
+    }
+    else if (command == "EndBeep")
+    {
+        endBeep(param1);
+        debugprintf("EndBeep: duration=%d\n", param1);
+    }
+    else if (command == "AudioWarble")
+    {
+        audioWarble(param1);
+        debugprintf("AudioWarble: times=%d\n", param1);
+    }
+    else if (command == "AudioPipNTimes")
+    {
+        audioPipNTimes(param1);
+        debugprintf("AudioPipNTimes: times=%d\n", param1);
+    }
+    else
+    {
+        debugprintf("Unknown beep command: %s\n", command.c_str());
+    }
+}
+
+// Function to parse space-separated values or comma-separated commands
+void processUARTCommand(const String& command)
+{
+    // Check if this is a comma-separated beep command
+    if (command.indexOf(',') != -1)
+    {
+        // Parse comma-separated beep command
+        int commaIndex1 = command.indexOf(',');
+        int commaIndex2 = command.indexOf(',', commaIndex1 + 1);
+        int commaIndex3 = command.indexOf(',', commaIndex2 + 1);
+        
+        if (commaIndex1 != -1 && commaIndex2 != -1 && commaIndex3 != -1)
+        {
+            String beepCommand = command.substring(0, commaIndex1);
+            int param1 = command.substring(commaIndex1 + 1, commaIndex2).toInt();
+            int param2 = command.substring(commaIndex2 + 1, commaIndex3).toInt();
+            int param3 = command.substring(commaIndex3 + 1).toInt();
+            
+            processBeepCommand(beepCommand, param1, param2, param3);
+        }
+        else
+        {
+            debugprintf("Error: Invalid beep command format: %s\n", command.c_str());
+        }
+    }
+    // Check if this is a space-separated numeric message
+    else if (command.indexOf(' ') != -1)
+    {
+        // Parse the space-separated values
+        int values[9];  // Array to hold the 9 expected values
+        int valueCount = 0;
+        int startIndex = 0;
+        
+        // Parse each space-separated value
+        for (int i = 0; i <= command.length(); i++)
+        {
+            if (i == command.length() || command.charAt(i) == ' ')
+            {
+                if (startIndex < i && valueCount < 9)
+                {
+                    String valueStr = command.substring(startIndex, i);
+                    values[valueCount] = valueStr.toInt();
+                    valueCount++;
+                }
+                startIndex = i + 1;
+            }
+        }
+        
+        // Assign values to global variables if we got all 9 values
+        if (valueCount == 9)
+        {
+            this_width = values[0];
+            initial_width = values[1];
+            delta_width = values[2];
+            response = values[3];
+            local_rings = values[4];
+            seconds = values[5];
+            skin_display = values[6];
+            dose = values[7];
+            no_info = values[8];
+            
+            debugprintf("Parsed values: tw=%d iw=%d dw=%d resp=%d lr=%d sec=%d sd=%d dose=%d ni=%d\n",
+                       this_width, initial_width, delta_width, response, local_rings, 
+                       seconds, skin_display, dose, no_info);
+        }
+        else
+        {
+            debugprintf("Error: Expected 9 values, got %d\n", valueCount);
+        }
+    }
+    else if (command.startsWith("THERAPY:"))
+    {
+        if (command.endsWith("ON"))
+        {
+            therapy = true;
+            debugprintln("Therapy activated via UART1");
+        }
+        else if (command.endsWith("OFF"))
+        {
+            therapy = false;
+            debugprintln("Therapy deactivated via UART1");
+        }
+    }
+    // Add more command parsing here as needed
+}
+
+void processIncomingUART()
+{
+    // Check if data is available on UART1
+    while (Serial1.available() > 0)
+    {
+        // Read until newline character (\n)
+        String uart_message = Serial1.readStringUntil('\n');
+        
+        // Remove any trailing carriage return (\r) if present
+        uart_message.trim();
+        
+        // Only process if we have actual content
+        if (uart_message.length() > 0)
+        {
+            debugprintf("UART1 RX: %s\n", uart_message.c_str());
+            processUARTCommand(uart_message);
+        }
+    }
+}
+
+
 
 void bleStateFunc()
 {
@@ -592,6 +749,7 @@ void taskGPIO(void *pvParametes)
     pinMode(ON_OFF_PIN, INPUT);
     pinMode(BATT_CHRG_PIN, INPUT_PULLUP);
     pinMode(BATT_STBY_PIN, INPUT_PULLUP);
+    pinMode(PIEZO_PIN, OUTPUT);
     setupButtonInterrupts();
 
     // Initialize MAX17048
@@ -643,6 +801,18 @@ void taskGPIO(void *pvParametes)
         }
 
         vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+void taskComm(void *pvParametes)
+{
+    for(;;)
+    {
+        checkParameterSettling();
+        processIncomingUART();
+        if(skin_display) therapy = true;
+        else therapy = false;
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -720,7 +890,7 @@ void sendParameterUpdate(uint16_t param_index)
         return; // Invalid parameter index
     }
     
-    char uart_message[64];
+    char uart_message[256];
     
     switch (param_index) {
         case 0: // Settings - no value to send
@@ -803,7 +973,7 @@ void IRAM_ATTR buttonFunc() {
     uint32_t current_time = millis();
     
     // Simple debounce - ignore if too soon after last event
-    if (current_time - button_timestamp < 20) return;
+    if (current_time - button_timestamp < 100) return;
     
     // Capture all button states in one read
     button_states = (digitalRead(BUTTON1) << 0) |
@@ -1269,6 +1439,49 @@ void initializeParameterDisplay() {
     debugprintln("Parameter display initialized");
 }
 
+// Beep function implementations - customize for your hardware
+void beep(int duration)
+{
+    tone(PIEZO_PIN, 4000, duration);  // 1000 Hz tone
+}
+
+void beepLow(int duration)
+{
+    // Generate low frequency beep using tone() if available
+    // or use PWM for lower frequency
+    tone(PIEZO_PIN, 500, duration);  // 500 Hz low tone
+}
+
+void beepPeriodic(int duration, int period)
+{
+    // This should probably be handled non-blocking in your main loop
+    // For now, just do a single beep - implement proper periodic beeping elsewhere
+    beep(duration);
+    debugprintf("Note: BeepPeriod needs non-blocking implementation in main loop\n");
+}
+
+void endBeep(int duration)
+{
+    // Could be a different tone or pattern to indicate "end"
+    tone(PIEZO_PIN, 1000, duration);  // Higher pitch for end signal
+}
+
+void audioWarble(int times)
+{
+    for (int i = 0; i < times; i++)
+    {
+        tone(PIEZO_PIN, 800, 100);   // High tone
+        tone(PIEZO_PIN, 400, 100);   // Low tone  
+    }
+}
+
+void audioPipNTimes(int times)
+{
+    for (int i = 0; i < times; i++)
+    {
+        tone(PIEZO_PIN, 1500, 50);   // Short high pip
+    }
+}
 
 void setup()
 {
@@ -1277,9 +1490,7 @@ void setup()
     playBeep();
     Serial.print("Init...");
 
-    // Initialize UART1 for parameter reporting on pin 18 (TX only)
-    Serial1.begin(115200, SERIAL_8N1, -1, UART_TX_PIN); // RX=-1 (not used), TX=18
-    debugprintln("UART1 initialized on pin 18 for parameter reporting");
+    Serial1.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
 
     Wire.begin(I2C_SDA, I2C_SCL);
     SPI.begin(35, 37, 36, -1); // SCLK, MISO, MOSI, SS
@@ -1291,6 +1502,11 @@ void setup()
     xTaskCreate(
         taskGPIO, "GPIO",
         4096, NULL, 2, &taskHandleGPIO);
+
+    // Initialize Comm
+    xTaskCreate(
+        taskComm, "Comm",
+        4096, NULL, 5, &taskHandleComm);
 
     // Initialize BLE
     xTaskCreate(
