@@ -8,35 +8,11 @@
 #include <EBF.h>
 #include <SparkFun_MAX1704x_Fuel_Gauge_Arduino_Library.h>
 
-#define DEBUG
+// #define DEBUG
 #ifdef DEBUG
-#define debugprint(...)                                 \
-    {                                                   \
-        if (serialMutex)                                \
-        {                                               \
-            xSemaphoreTake(serialMutex, portMAX_DELAY); \
-            Serial.print(__VA_ARGS__);                  \
-            xSemaphoreGive(serialMutex);                \
-        }                                               \
-    }
-#define debugprintln(...)                               \
-    {                                                   \
-        if (serialMutex)                                \
-        {                                               \
-            xSemaphoreTake(serialMutex, portMAX_DELAY); \
-            Serial.println(__VA_ARGS__);                \
-            xSemaphoreGive(serialMutex);                \
-        }                                               \
-    }
-#define debugprintf(...)                                \
-    {                                                   \
-        if (serialMutex)                                \
-        {                                               \
-            xSemaphoreTake(serialMutex, portMAX_DELAY); \
-            Serial.printf(__VA_ARGS__);                 \
-            xSemaphoreGive(serialMutex);                \
-        }                                               \
-    }
+#define debugprint(...) {if(serialMutex){xSemaphoreTake(serialMutex, portMAX_DELAY);Serial.print(__VA_ARGS__);xSemaphoreGive(serialMutex);}}
+#define debugprintln(...) {if(serialMutex){xSemaphoreTake(serialMutex, portMAX_DELAY);Serial.println(__VA_ARGS__);xSemaphoreGive(serialMutex);}}
+#define debugprintf(...) {if(serialMutex){xSemaphoreTake(serialMutex, portMAX_DELAY);Serial.printf(__VA_ARGS__);xSemaphoreGive(serialMutex);}}
 #else
 #define debugprint(...)
 #define debugprintln(...)
