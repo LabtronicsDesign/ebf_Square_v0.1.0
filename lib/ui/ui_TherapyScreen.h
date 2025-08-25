@@ -23,7 +23,7 @@ extern lv_obj_t *ui_BT_Icon2;
 extern lv_obj_t *ui_Start_Group2;
 extern lv_obj_t *ui_Start_Bg2;
 extern lv_obj_t *ui_Start_Num_Bg2;
-extern lv_obj_t *ui_Label_Start2;
+extern lv_obj_t *ui_Label_Initial;
 extern lv_obj_t *ui_Freq_Text2;
 extern lv_obj_t *ui_Freq_Value2;
 extern lv_obj_t *ui_Button_Panel2;
@@ -34,14 +34,19 @@ extern lv_obj_t *ui_ButtonRight2;
 extern lv_obj_t *ui_Present_Group1;
 extern lv_obj_t *ui_Present_Bg1;
 extern lv_obj_t *ui_Present_Num_Bg1;
-extern lv_obj_t *ui_Label_Present1;
+extern lv_obj_t *ui_Label_Response;
 extern lv_obj_t *ui_Speed_Group;
 extern lv_obj_t *ui_Speed_Bg;
 extern lv_obj_t *ui_Speed_Num_Bg;
-extern lv_obj_t *ui_Label_Speed;
+extern lv_obj_t *ui_Label_Current;
 extern lv_obj_t *ui_Strength_Value1;
 extern lv_obj_t *ui_Extra_Value1;
 extern lv_obj_t *ui_Extra_Value2;
+extern lv_obj_t *ui_Text3;
+extern lv_obj_t *ui_Text1;
+extern lv_obj_t *ui_Text2;
+extern lv_obj_t *ui_Text4;
+extern lv_obj_t *ui_Text5;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus
