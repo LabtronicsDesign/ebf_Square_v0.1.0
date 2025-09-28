@@ -2,7 +2,7 @@
 #include <stdbool.h>
 
 /* Therapy parameter limits */
-#define STRENGTH_MAX            100
+#define STRENGTH_MAX            250
 #define STRENGTH_MIN            10
 #define FREQ_MIN                15
 #define FREQ_MAX                350

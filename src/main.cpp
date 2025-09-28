@@ -8,7 +8,7 @@
 #include <EBF.h>
 #include <SparkFun_MAX1704x_Fuel_Gauge_Arduino_Library.h>
 
-// #define DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define debugprint(...) {if(serialMutex){xSemaphoreTake(serialMutex, portMAX_DELAY);Serial.print(__VA_ARGS__);xSemaphoreGive(serialMutex);}}
 #define debugprintln(...) {if(serialMutex){xSemaphoreTake(serialMutex, portMAX_DELAY);Serial.println(__VA_ARGS__);xSemaphoreGive(serialMutex);}}
@@ -58,9 +58,10 @@
 #define BATTERY_READ_INTERVAL 5000 // Read battery every 5 seconds
 
 // Piezo beep configuration
-#define BEEP_FREQUENCY 2000            // Hz - frequency of beep
+#define BEEP_FREQUENCY 4000            // Hz - frequency of beep
 #define BEEP_DURATION 50               // ms - duration of beep
-#define BEEP_AUTOREPEAT_FREQUENCY 1500 // Hz - frequency of auto-repeat beep (lower pitch)
+#define BEEP_AUTOREPEAT_FREQUENCY_HI 2200 // Hz - frequency of auto-repeat beep (higher pitch)
+#define BEEP_AUTOREPEAT_FREQUENCY_LO 1800 // Hz - frequency of auto-repeat beep (lower pitch)
 #define BEEP_AUTOREPEAT_DURATION 30    // ms - duration of auto-repeat beep (shorter)
 
 // UART parameter reporting configuration
@@ -68,19 +69,53 @@
 
 // BLE UUIDs
 #define SERVICE_UUID "7ece5c94-6705-4551-9704-c8a6b848897f"
-#define CHARACTERISTIC_FREQ_UUID "35b570e4-05b2-4055-8043-7d1346e3f0c3"
-#define CHARACTERISTIC_STR_UUID "41538e4b-1fa3-4215-a23f-f34115487382"
-#define CHARACTERISTIC_INTEN_UUID "ff348571-87df-4ec5-b6d0-2cb248faa18e"
-#define CHARACTERISTIC_BATT_UUID "5f3f6ecd-3f39-45c3-a987-a7cc8725e67c"
 
-// MAX17048 fuel gauge
-SFE_MAX1704X lipo(MAX1704X_MAX17048);
+// Input Parameter Characteristics (WRITE/READ)
+#define CHARACTERISTIC_STRENGTH_UUID     "db156362-a14f-436d-a9ae-6c37bfa97de1"
+#define CHARACTERISTIC_FREQ_CYCLING_UUID "7f871c04-0aef-4345-a657-04845f64fbea" 
+#define CHARACTERISTIC_BASE_FREQ_UUID    "5ed9ba97-d508-4d65-8dc4-0cb5d6e6d64a"
+#define CHARACTERISTIC_INTENSITY_UUID    "7cf376d4-8aee-4eea-b48c-20b581594b4a"
+#define CHARACTERISTIC_INTERVAL_GAP_UUID "1038f0d3-c3b9-43c5-9f90-832df9385e91"
+#define CHARACTERISTIC_FILTER_UUID       "cc84be3d-ca51-4b4d-8fa7-df6911fd80cb"
+#define CHARACTERISTIC_MODULATION_UUID   "6347a247-f8e4-4747-a478-37fed30d6a77"
 
-// BLE Components
+// Output Reading Characteristics (READ/NOTIFY)
+#define CHARACTERISTIC_THIS_WIDTH_UUID   "44d8a8a5-8c58-4cb8-9202-5b1435162bcf"
+#define CHARACTERISTIC_INITIAL_WIDTH_UUID "e5537960-4f6b-4e45-8bab-a964529c57d5"
+#define CHARACTERISTIC_DELTA_WIDTH_UUID  "60edee54-bf06-48ae-aa45-2bb2288daf4e"
+#define CHARACTERISTIC_RESPONSE_UUID     "f2de385b-6d3b-47aa-ab69-e1910060c710"
+#define CHARACTERISTIC_LOCAL_RINGS_UUID  "a0647347-7de1-42fa-a65c-6b4c1a2c996c"
+#define CHARACTERISTIC_SECONDS_UUID      "ba444839-1503-495e-90e8-45cba4521f7b"
+#define CHARACTERISTIC_SKIN_DISPLAY_UUID "13292960-bdfd-48d7-9b95-5b59322ab67f"
+#define CHARACTERISTIC_DOSE_UUID         "ca1b88e1-0955-4d11-9773-912310eba723"
+#define CHARACTERISTIC_NO_INFO_UUID      "52a028e0-93c8-4d6e-be29-deae02e450ab"
+
+// Battery characteristic (keep existing)
+#define CHARACTERISTIC_BATT_UUID         "a55fd2fc-85b4-4afb-948a-c9721f76c9eb"
+
 NimBLEServer *bleServer;
-NimBLECharacteristic *pCharFrequency;
+
+// BLE Characteristic pointers - Input Parameters
 NimBLECharacteristic *pCharStrength;
+NimBLECharacteristic *pCharFreqCycling;
+NimBLECharacteristic *pCharBaseFreq;
 NimBLECharacteristic *pCharIntensity;
+NimBLECharacteristic *pCharIntervalGap;
+NimBLECharacteristic *pCharFilter;
+NimBLECharacteristic *pCharModulation;
+
+// BLE Characteristic pointers - Output Readings
+NimBLECharacteristic *pCharThisWidth;
+NimBLECharacteristic *pCharInitialWidth;
+NimBLECharacteristic *pCharDeltaWidth;
+NimBLECharacteristic *pCharResponse;
+NimBLECharacteristic *pCharLocalRings;
+NimBLECharacteristic *pCharSeconds;
+NimBLECharacteristic *pCharSkinDisplay;
+NimBLECharacteristic *pCharDose;
+NimBLECharacteristic *pCharNoInfo;
+
+// Battery characteristic (existing)
 NimBLECharacteristic *pCharBattery;
 
 TaskHandle_t taskHandleDisplay;
@@ -89,6 +124,9 @@ TaskHandle_t taskHandleBLE;
 TaskHandle_t taskHandleComm;
 
 SemaphoreHandle_t serialMutex;
+
+// MAX17048 fuel gauge
+SFE_MAX1704X lipo(MAX1704X_MAX17048);
 
 bool standbyStatus, chargeBattStatus, fullBattStatus, bleConnected;
 
@@ -126,7 +164,7 @@ struct ButtonState
 } button_states_tracker[4] = {0};
 
 parameter_block_t param = {
-    .strength = 50,
+    .strength = 10,
     .freq_cycling = 0,
     .base_freq = FREQ_DEF,
     .intensity = INTENSITY_MIN,
@@ -162,7 +200,8 @@ void initializeParameterDisplay();
 void initializeMAX17048();
 void readBatteryPercentage();
 void playBeep();
-void playAutoRepeatBeep();
+void playAutoRepeatLoBeep();
+void playAutoRepeatHiBeep();
 void sendParameterUpdate(uint16_t param_index);
 void checkParameterSettling();
 void notifyParameterChange(uint16_t param_index, bool is_auto_repeat);
@@ -232,6 +271,81 @@ class ServerCallbacks : public NimBLEServerCallbacks
         debugprintf("Secured connection to: %s\n", connInfo.getAddress().toString().c_str());
     }
 } serverCallbacks;
+
+// Callback class for handling characteristic writes
+class InputParamCallbacks: public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) {
+        std::string uuid = pCharacteristic->getUUID().toString();
+        std::string value = pCharacteristic->getValue();
+        
+        if (value.length() == 0) return;
+        
+        // Convert value to appropriate data type and update parameters
+        if (uuid == CHARACTERISTIC_STRENGTH_UUID) {
+            int newValue = std::stoi(value);
+            if (newValue >= STRENGTH_MIN && newValue <= STRENGTH_MAX) {
+                param.strength = newValue;
+                debugprintf("BLE: Strength set to %d\n", param.strength);
+                notifyParameterChange(1, false); // Strength is index 1
+                updateParameterDisplay();
+            }
+        }
+        else if (uuid == CHARACTERISTIC_FREQ_CYCLING_UUID) {
+            int newValue = std::stoi(value);
+            if (newValue >= 0 && newValue <= 1) {
+                param.freq_cycling = newValue;
+                debugprintf("BLE: Freq Cycling set to %s\n", param.freq_cycling ? "ON" : "OFF");
+                notifyParameterChange(2, false); // Freq Cycling is index 2
+                updateParameterDisplay();
+            }
+        }
+        else if (uuid == CHARACTERISTIC_BASE_FREQ_UUID) {
+            int newValue = std::stoi(value);
+            if (newValue >= FREQ_MIN && newValue <= FREQ_MAX) {
+                param.base_freq = newValue;
+                debugprintf("BLE: Base Frequency set to %d Hz\n", param.base_freq);
+                notifyParameterChange(3, false); // Frequency is index 3
+                updateParameterDisplay();
+            }
+        }
+        else if (uuid == CHARACTERISTIC_INTENSITY_UUID) {
+            int newValue = std::stoi(value);
+            if (newValue >= INTENSITY_MIN && newValue <= INTENSITY_MAX) {
+                param.intensity = newValue;
+                debugprintf("BLE: Intensity set to %d\n", param.intensity);
+                notifyParameterChange(4, false); // Intensity is index 4
+                updateParameterDisplay();
+            }
+        }
+        else if (uuid == CHARACTERISTIC_INTERVAL_GAP_UUID) {
+            int newValue = std::stoi(value);
+            if (newValue >= Z_MIN && newValue <= Z_MAX) {
+                param.interval_gap = newValue;
+                debugprintf("BLE: Interval Gap set to %d\n", param.interval_gap);
+                notifyParameterChange(5, false); // Interval Gap is index 5
+                updateParameterDisplay();
+            }
+        }
+        else if (uuid == CHARACTERISTIC_FILTER_UUID) {
+            int newValue = std::stoi(value);
+            if (newValue >= 0 && newValue <= 1) {
+                param.filter = newValue;
+                debugprintf("BLE: Filter set to %s\n", param.filter ? "ON" : "OFF");
+                notifyParameterChange(6, false); // Filter is index 6
+                updateParameterDisplay();
+            }
+        }
+        else if (uuid == CHARACTERISTIC_MODULATION_UUID) {
+            int newValue = std::stoi(value);
+            if (newValue >= MODULATION_MIN && newValue <= MODULATION_MAX) {
+                param.modulation = newValue;
+                debugprintf("BLE: Modulation set to %d\n", param.modulation);
+                notifyParameterChange(7, false); // Modulation is index 7
+                updateParameterDisplay();
+            }
+        }
+    }
+};
 
 // Function to initialize LVGL
 void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *pixelmap)
@@ -616,7 +730,8 @@ void chargeStateFunc()
         }
 
         // Update previous state variables
-        playBeep();
+        if((prev_battery_state <= 0 && current_battery_state > 0)||(prev_battery_state > 0 && current_battery_state <= 0))
+            playBeep();
         prev_battery_state = current_battery_state;
         prev_battery_percentage = batteryPercentage;
     }
@@ -727,21 +842,100 @@ void taskBLE(void *pvParameters)
 
     NimBLEService *pService = bleServer->createService(SERVICE_UUID);
 
-    pCharFrequency = pService->createCharacteristic(
-        CHARACTERISTIC_FREQ_UUID,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
-
+    // Create input parameter characteristics (READ/WRITE) with descriptors
     pCharStrength = pService->createCharacteristic(
-        CHARACTERISTIC_STR_UUID,
+        CHARACTERISTIC_STRENGTH_UUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+    pCharStrength->setCallbacks(new InputParamCallbacks());
+    pCharStrength->createDescriptor("2901")->setValue("EBF Strength (10-100%)");
+
+    pCharFreqCycling = pService->createCharacteristic(
+        CHARACTERISTIC_FREQ_CYCLING_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+    pCharFreqCycling->setCallbacks(new InputParamCallbacks());
+    pCharFreqCycling->createDescriptor("2901")->setValue("Frequency Cycling (0=OFF, 1=ON)");
+
+    pCharBaseFreq = pService->createCharacteristic(
+        CHARACTERISTIC_BASE_FREQ_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+    pCharBaseFreq->setCallbacks(new InputParamCallbacks());
+    pCharBaseFreq->createDescriptor("2901")->setValue("Base Frequency (15-350 Hz)");
 
     pCharIntensity = pService->createCharacteristic(
-        CHARACTERISTIC_INTEN_UUID,
+        CHARACTERISTIC_INTENSITY_UUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+    pCharIntensity->setCallbacks(new InputParamCallbacks());
+    pCharIntensity->createDescriptor("2901")->setValue("EBF Intensity Level (1-8)");
 
+    pCharIntervalGap = pService->createCharacteristic(
+        CHARACTERISTIC_INTERVAL_GAP_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+    pCharIntervalGap->setCallbacks(new InputParamCallbacks());
+    pCharIntervalGap->createDescriptor("2901")->setValue("Inter-pulse Gap (10-80)");
+
+    pCharFilter = pService->createCharacteristic(
+        CHARACTERISTIC_FILTER_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+    pCharFilter->setCallbacks(new InputParamCallbacks());
+    pCharFilter->createDescriptor("2901")->setValue("Signal Filter (0=OFF, 1=ON)");
+
+    pCharModulation = pService->createCharacteristic(
+        CHARACTERISTIC_MODULATION_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+    pCharModulation->setCallbacks(new InputParamCallbacks());
+    pCharModulation->createDescriptor("2901")->setValue("Modulation Level (0=OFF, 1-5)");
+
+    // Create output reading characteristics (READ/NOTIFY only) with descriptors
+    pCharThisWidth = pService->createCharacteristic(
+        CHARACTERISTIC_THIS_WIDTH_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    pCharThisWidth->createDescriptor("2901")->setValue("Current Width Reading");
+
+    pCharInitialWidth = pService->createCharacteristic(
+        CHARACTERISTIC_INITIAL_WIDTH_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    pCharInitialWidth->createDescriptor("2901")->setValue("Initial Width Reading");
+
+    pCharDeltaWidth = pService->createCharacteristic(
+        CHARACTERISTIC_DELTA_WIDTH_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    pCharDeltaWidth->createDescriptor("2901")->setValue("Width Delta (Change)");
+
+    pCharResponse = pService->createCharacteristic(
+        CHARACTERISTIC_RESPONSE_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    pCharResponse->createDescriptor("2901")->setValue("Therapy Response Level");
+
+    pCharLocalRings = pService->createCharacteristic(
+        CHARACTERISTIC_LOCAL_RINGS_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    pCharLocalRings->createDescriptor("2901")->setValue("Local Rings Count");
+
+    pCharSeconds = pService->createCharacteristic(
+        CHARACTERISTIC_SECONDS_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    pCharSeconds->createDescriptor("2901")->setValue("Session Time (seconds)");
+
+    pCharSkinDisplay = pService->createCharacteristic(
+        CHARACTERISTIC_SKIN_DISPLAY_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    pCharSkinDisplay->createDescriptor("2901")->setValue("Skin Contact Display");
+
+    pCharDose = pService->createCharacteristic(
+        CHARACTERISTIC_DOSE_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    pCharDose->createDescriptor("2901")->setValue("Therapy Dose Level");
+
+    pCharNoInfo = pService->createCharacteristic(
+        CHARACTERISTIC_NO_INFO_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    pCharNoInfo->createDescriptor("2901")->setValue("No Info Status Flag");
+
+    // Battery characteristic (existing) with descriptor
     pCharBattery = pService->createCharacteristic(
         CHARACTERISTIC_BATT_UUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    pCharBattery->createDescriptor("2901")->setValue("Battery Level (0-100%)");
 
     pService->start();
 
@@ -749,21 +943,64 @@ void taskBLE(void *pvParameters)
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
     pAdvertising->setName(buff);
     pAdvertising->addServiceUUID(SERVICE_UUID);
-    /**
-     *  If your device is battery powered you may consider setting scan response
-     *  to false as it will extend battery life at the expense of less data sent.
-     */
     pAdvertising->enableScanResponse(true);
     pAdvertising->start();
+
+    // Initialize input parameter characteristic values
+    pCharStrength->setValue(std::to_string(param.strength));
+    pCharFreqCycling->setValue(std::to_string(param.freq_cycling));
+    pCharBaseFreq->setValue(std::to_string(param.base_freq));
+    pCharIntensity->setValue(std::to_string(param.intensity));
+    pCharIntervalGap->setValue(std::to_string(param.interval_gap));
+    pCharFilter->setValue(std::to_string(param.filter));
+    pCharModulation->setValue(std::to_string(param.modulation));
 
     for (;;)
     {
         if (bleServer->getConnectedCount())
         {
             bleConnected = true;
-            //   uint8_t battLevel = static_cast<uint8_t>(batterySOC);
-            //   pCharBattery->setValue(&battLevel, 1);
-            pCharBattery->setValue(4);
+
+            // Update input parameter characteristic values
+            pCharStrength->setValue(std::to_string(param.strength));
+            pCharFreqCycling->setValue(std::to_string(param.freq_cycling));
+            pCharBaseFreq->setValue(std::to_string(param.base_freq));
+            pCharIntensity->setValue(std::to_string(param.intensity));
+            pCharIntervalGap->setValue(std::to_string(param.interval_gap));
+            pCharFilter->setValue(std::to_string(param.filter));
+            pCharModulation->setValue(std::to_string(param.modulation));
+
+            // Update output reading characteristics and notify
+            pCharThisWidth->setValue(std::to_string(this_width));
+            pCharThisWidth->notify();
+            
+            pCharInitialWidth->setValue(std::to_string(initial_width));
+            pCharInitialWidth->notify();
+            
+            pCharDeltaWidth->setValue(std::to_string(delta_width));
+            pCharDeltaWidth->notify();
+            
+            pCharResponse->setValue(std::to_string(response));
+            pCharResponse->notify();
+            
+            pCharLocalRings->setValue(std::to_string(local_rings));
+            pCharLocalRings->notify();
+            
+            pCharSeconds->setValue(std::to_string(seconds));
+            pCharSeconds->notify();
+            
+            pCharSkinDisplay->setValue(std::to_string(skin_display));
+            pCharSkinDisplay->notify();
+            
+            pCharDose->setValue(std::to_string(dose));
+            pCharDose->notify();
+            
+            pCharNoInfo->setValue(std::to_string(no_info));
+            pCharNoInfo->notify();
+
+            // Update battery characteristic
+            uint8_t battLevel = static_cast<uint8_t>(batteryPercentage);
+            pCharBattery->setValue(&battLevel, 1);
             pCharBattery->notify();
         }
         else
@@ -901,11 +1138,17 @@ void playBeep()
     debugprintf("Beep played: %dHz for %dms\n", BEEP_FREQUENCY, BEEP_DURATION);
 }
 
-void playAutoRepeatBeep()
+void playAutoRepeatHiBeep()
 {
     // Generate a shorter, lower-pitched beep for auto-repeat
-    tone(PIEZO_PIN, BEEP_AUTOREPEAT_FREQUENCY, BEEP_AUTOREPEAT_DURATION);
-    debugprintf("Auto-repeat beep played: %dHz for %dms\n", BEEP_AUTOREPEAT_FREQUENCY, BEEP_AUTOREPEAT_DURATION);
+    tone(PIEZO_PIN, BEEP_AUTOREPEAT_FREQUENCY_HI, BEEP_AUTOREPEAT_DURATION);
+    debugprintf("Auto-repeat beep played: %dHz for %dms\n", BEEP_AUTOREPEAT_FREQUENCY_HI, BEEP_AUTOREPEAT_DURATION);
+}
+void playAutoRepeatLoBeep()
+{
+    // Generate a shorter, lower-pitched beep for auto-repeat
+    tone(PIEZO_PIN, BEEP_AUTOREPEAT_FREQUENCY_LO, BEEP_AUTOREPEAT_DURATION);
+    debugprintf("Auto-repeat beep played: %dHz for %dms\n", BEEP_AUTOREPEAT_FREQUENCY_LO, BEEP_AUTOREPEAT_DURATION);
 }
 
 void sendParameterUpdate(uint16_t param_index)
@@ -1014,21 +1257,15 @@ void checkParameterSettling()
 // Simple ISR - just capture button states and exit quickly
 void IRAM_ATTR buttonFunc()
 {
-    uint32_t current_time = millis();
-
-    // Simple debounce - ignore if too soon after last event
-    if (current_time - button_timestamp < 100)
-        return;
-
-    // Capture all button states in one read
+    // Capture all button states in one read (no debounce needed with hardware capacitors)
     button_states = (digitalRead(BUTTON1) << 0) |
                     (digitalRead(BUTTON2) << 1) |
                     (digitalRead(BUTTON3) << 2) |
                     (digitalRead(BUTTON4) << 3);
 
-    button_timestamp = current_time;
     button_event_pending = true; // Signal main loop to process
 }
+
 
 // Helper functions (moved out of ISR)
 void handleButtonPress(lv_obj_t *btn)
@@ -1378,12 +1615,16 @@ void updateParameterDisplay()
         {
             if (ui_Freq_Value1)
                 lv_label_set_text(ui_Freq_Value1, "Cycle");
+            if (ui_Freq_Value2)
+                lv_label_set_text(ui_Freq_Value2, "Cycle");
         }
         else
         {
             lv_snprintf(buffer, sizeof(buffer), "%dHz", param.base_freq);
             if (ui_Freq_Value1)
                 lv_label_set_text(ui_Freq_Value1, buffer);
+            if (ui_Freq_Value2)
+                lv_label_set_text(ui_Freq_Value2, buffer);
         }
     }
 
@@ -1511,90 +1752,88 @@ void processButtonEvents()
             {2, "BTN3", ui_ButtonMidRight1, ui_ButtonMidRight2},
             {3, "BTN4", ui_ButtonRight1, ui_ButtonRight2}};
 
-        // Process each button
+        // Process each button for state changes
         for (int i = 0; i < 4; i++)
         {
             bool prev_state = (prev_states >> buttons[i].bit_pos) & 1;
             bool curr_state = (current_states >> buttons[i].bit_pos) & 1;
 
-            // Button press detected (HIGH -> LOW, since buttons are active LOW)
-            if (prev_state == 1 && curr_state == 0)
+            // Only process if state actually changed
+            if (prev_state != curr_state)
             {
-                debugprintf("%s-PRESS on %s\n", buttons[i].name,
-                            (current_screen == ui_MainScreen) ? "MainScreen" : (current_screen == ui_TherapyScreen) ? "TherapyScreen"
-                                                                                                                    : "Unknown");
-
-                // Play beep for successful button press
-                playBeep();
-
-                // Update button state tracking
-                button_states_tracker[i].is_pressed = true;
-                button_states_tracker[i].press_start_time = current_time;
-                button_states_tracker[i].last_repeat_time = current_time;
-                button_states_tracker[i].auto_repeating = false;
-
-                if (current_screen == ui_MainScreen)
+                // Button press detected (HIGH -> LOW, since buttons are active LOW)
+                if (prev_state == 1 && curr_state == 0)
                 {
-                    handleButtonPress(buttons[i].main_btn);
+                    debugprintf("%s-PRESS on %s\n", buttons[i].name,
+                                (current_screen == ui_MainScreen) ? "MainScreen" : (current_screen == ui_TherapyScreen) ? "TherapyScreen"
+                                                                                                                        : "Unknown");
 
-                    // Special controls for MainScreen
-                    if (i == 0)
-                    { // BUTTON1 - Roller UP
-                        adjustRoller(ui_Roller_Topic1, true);
-                        updateParameterDisplay(); // Update display after roller change
-                        // debugprintln("Roller UP");
+                    // Play beep for successful button press
+                    playBeep();
+
+                    // Update button state tracking
+                    button_states_tracker[i].is_pressed = true;
+                    button_states_tracker[i].press_start_time = current_time;
+                    button_states_tracker[i].last_repeat_time = current_time;
+                    button_states_tracker[i].auto_repeating = false;
+
+                    if (current_screen == ui_MainScreen)
+                    {
+                        handleButtonPress(buttons[i].main_btn);
+
+                        // Special controls for MainScreen
+                        if (i == 0)
+                        { // BUTTON1 - Roller UP
+                            adjustRoller(ui_Roller_Topic1, true);
+                            updateParameterDisplay(); // Update display after roller change
+                        }
+                        else if (i == 1)
+                        { // BUTTON2 - Roller DOWN
+                            adjustRoller(ui_Roller_Topic1, false);
+                            updateParameterDisplay(); // Update display after roller change
+                        }
+                        else if (i == 2)
+                        { // BUTTON3 - Increase Parameter
+                            adjustParameter(true);
+                        }
+                        else if (i == 3)
+                        { // BUTTON4 - Decrease Parameter
+                            adjustParameter(false);
+                        }
                     }
-                    else if (i == 1)
-                    { // BUTTON2 - Roller DOWN
-                        adjustRoller(ui_Roller_Topic1, false);
-                        updateParameterDisplay(); // Update display after roller change
-                        // debugprintln("Roller DOWN");
-                    }
-                    else if (i == 2)
-                    { // BUTTON3 - Increase Parameter
-                        adjustParameter(true);
-                        // debugprintln("Parameter INCREASE");
-                    }
-                    else if (i == 3)
-                    { // BUTTON4 - Decrease Parameter
-                        adjustParameter(false);
-                        // debugprintln("Parameter DECREASE");
+                    else if (current_screen == ui_TherapyScreen)
+                    {
+                        handleButtonPress(buttons[i].therapy_btn);
+                        if (i == 2)
+                        { // BUTTON3 - Increase Parameter
+                            adjustParameter(true);
+                        }
+                        else if (i == 3)
+                        { // BUTTON4 - Decrease Parameter
+                            adjustParameter(false);
+                        }
                     }
                 }
-                else if (current_screen == ui_TherapyScreen)
+
+                // Button release detected (LOW -> HIGH)
+                else if (prev_state == 0 && curr_state == 1)
                 {
-                    handleButtonPress(buttons[i].therapy_btn);
-                    if (i == 2)
-                    { // BUTTON3 - Increase Parameter
-                        adjustParameter(true);
-                        // debugprintln("Parameter INCREASE");
+                    debugprintf("%s-RELEASE on %s\n", buttons[i].name,
+                                (current_screen == ui_MainScreen) ? "MainScreen" : (current_screen == ui_TherapyScreen) ? "TherapyScreen"
+                                                                                                                        : "Unknown");
+
+                    // Update button state tracking
+                    button_states_tracker[i].is_pressed = false;
+                    button_states_tracker[i].auto_repeating = false;
+
+                    if (current_screen == ui_MainScreen)
+                    {
+                        handleButtonRelease(buttons[i].main_btn);
                     }
-                    else if (i == 3)
-                    { // BUTTON4 - Decrease Parameter
-                        adjustParameter(false);
-                        // debugprintln("Parameter DECREASE");
+                    else if (current_screen == ui_TherapyScreen)
+                    {
+                        handleButtonRelease(buttons[i].therapy_btn);
                     }
-                }
-            }
-
-            // Button release detected (LOW -> HIGH)
-            else if (prev_state == 0 && curr_state == 1)
-            {
-                // debugprintf("%s-RELEASE on %s\n", buttons[i].name,
-                //            (current_screen == ui_MainScreen) ? "MainScreen" :
-                //            (current_screen == ui_TherapyScreen) ? "TherapyScreen" : "Unknown");
-
-                // Update button state tracking
-                button_states_tracker[i].is_pressed = false;
-                button_states_tracker[i].auto_repeating = false;
-
-                if (current_screen == ui_MainScreen)
-                {
-                    handleButtonRelease(buttons[i].main_btn);
-                }
-                else if (current_screen == ui_TherapyScreen)
-                {
-                    handleButtonRelease(buttons[i].therapy_btn);
                 }
             }
         }
@@ -1622,7 +1861,7 @@ void processButtonEvents()
                     {
                         button_states_tracker[i].auto_repeating = true;
                         button_states_tracker[i].last_repeat_time = current_time;
-                        // debugprintf("Auto-repeat started for BTN%d\n", i + 1);
+                        debugprintf("Auto-repeat started for BTN%d\n", i + 1);
                     }
 
                     // Process auto-repeat
@@ -1634,19 +1873,58 @@ void processButtonEvents()
                         {
                             button_states_tracker[i].last_repeat_time = current_time;
 
-                            // Play auto-repeat beep
-                            playAutoRepeatBeep();
-
                             if (i == 2)
                             { // BUTTON3 - Increase Parameter
+                                playAutoRepeatHiBeep();// Play auto-repeat beep
                                 adjustParameter(true);
-                                // debugprintln("Parameter INCREASE (auto-repeat)");
                             }
                             else if (i == 3)
                             { // BUTTON4 - Decrease Parameter
+                                playAutoRepeatLoBeep();// Play auto-repeat beep
                                 adjustParameter(false);
-                                // debugprintln("Parameter DECREASE (auto-repeat)");
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else if (current_screen == ui_TherapyScreen)
+    {
+        // Handle auto-repeat for therapy screen strength adjustment
+        for (int i = 2; i < 4; i++)
+        { // Only BUTTON3 and BUTTON4
+            if (button_states_tracker[i].is_pressed)
+            {
+                uint32_t hold_duration = current_time - button_states_tracker[i].press_start_time;
+
+                // Check if we should start auto-repeat
+                if (!button_states_tracker[i].auto_repeating && hold_duration >= AUTO_REPEAT_INITIAL_DELAY)
+                {
+                    button_states_tracker[i].auto_repeating = true;
+                    button_states_tracker[i].last_repeat_time = current_time;
+                    debugprintf("Auto-repeat started for BTN%d on TherapyScreen\n", i + 1);
+                }
+
+                // Process auto-repeat
+                if (button_states_tracker[i].auto_repeating)
+                {
+                    uint32_t time_since_last_repeat = current_time - button_states_tracker[i].last_repeat_time;
+
+                    if (time_since_last_repeat >= AUTO_REPEAT_INTERVAL)
+                    {
+                        button_states_tracker[i].last_repeat_time = current_time;
+
+
+                        if (i == 2)
+                        { // BUTTON3 - Increase Parameter
+                            playAutoRepeatHiBeep();// Play auto-repeat beep
+                            adjustParameter(true);
+                        }
+                        else if (i == 3)
+                        { // BUTTON4 - Decrease Parameter
+                            playAutoRepeatLoBeep();// Play auto-repeat beep
+                            adjustParameter(false);
                         }
                     }
                 }
@@ -1687,7 +1965,7 @@ void beepLow(int duration)
 {
     // Generate low frequency beep using tone() if available
     // or use PWM for lower frequency
-    tone(PIEZO_PIN, 500, duration); // 500 Hz low tone
+    tone(PIEZO_PIN, 1000, duration); // 500 Hz low tone
 }
 
 void beepPeriodic(int duration, int period)
@@ -1701,7 +1979,7 @@ void beepPeriodic(int duration, int period)
 void endBeep(int duration)
 {
     // Could be a different tone or pattern to indicate "end"
-    tone(PIEZO_PIN, 1000, duration); // Higher pitch for end signal
+    tone(PIEZO_PIN, 2000, duration); // Higher pitch for end signal
 }
 
 void audioWarble(int times)
@@ -1717,7 +1995,7 @@ void audioPipNTimes(int times)
 {
     for (int i = 0; i < times; i++)
     {
-        tone(PIEZO_PIN, 1500, 50); // Short high pip
+        tone(PIEZO_PIN, 4000, 50); // Short high pip
     }
 }
 
