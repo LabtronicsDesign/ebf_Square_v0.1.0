@@ -128,7 +128,7 @@ SemaphoreHandle_t serialMutex;
 // MAX17048 fuel gauge
 SFE_MAX1704X lipo(MAX1704X_MAX17048);
 
-bool standbyStatus, chargeBattStatus, fullBattStatus, bleConnected;
+bool standbyStatus, chargeBattStatus, fullBattStatus, bleConnected, startTherapyUpdate;
 
 // Global therapy mode variable for screen switching
 bool therapy = false;
@@ -202,6 +202,7 @@ void readBatteryPercentage();
 void playBeep();
 void playAutoRepeatLoBeep();
 void playAutoRepeatHiBeep();
+void sendStartStopMessage(bool start);
 void sendParameterUpdate(uint16_t param_index);
 void checkParameterSettling();
 void notifyParameterChange(uint16_t param_index, bool is_auto_repeat);
@@ -396,6 +397,7 @@ void taskDisplay(void *pvParameters)
     ui_init();
 
     initializeParameterDisplay();
+    vTaskDelay(pdMS_TO_TICKS(2000)); // Short delay to ensure display is ready
 
     for (;;)
     {
@@ -756,6 +758,17 @@ void onOffSliderFunc()
                 // reset some values
                 therapy = false;
                 bleConnected = false;
+                //reset all parameters to default
+                param.strength = 10;
+                param.freq_cycling = 0;
+                param.base_freq = FREQ_DEF;
+                param.intensity = INTENSITY_MIN;
+                param.interval_gap = Z_DEF;
+                param.filter = 0;
+                param.modulation = 0;
+                updateParameterDisplay();
+
+                startTherapyUpdate = true;
             }
             // lv_scr_load_anim(ui_MainScreen, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
         }
@@ -770,6 +783,7 @@ void onOffSliderFunc()
             {
                 lv_scr_load(ui_ChargingScreen);
                 debugprintln("Loaded ChargingScreen");
+                startTherapyUpdate = false;
             }
         }
         playBeep();
@@ -1076,8 +1090,30 @@ void taskGPIO(void *pvParametes)
 
 void taskComm(void *pvParametes)
 {
+    vTaskDelay(pdMS_TO_TICKS(200)); // Wait for 2 seconds to allow other tasks to initialize
+    for(int i = 0; i <= 7; i++){
+        sendParameterUpdate(i); // Send all parameters at startup
+        vTaskDelay(pdMS_TO_TICKS(100)); // Short delay between messages
+    }
     for (;;)
     {
+        if(Serial.available()){
+            //if received data is "r", then restart the ESP32
+            String command = Serial.readStringUntil('\n');
+            command.trim(); // Remove any trailing newline or spaces
+            if (command.equalsIgnoreCase("r")) {
+                debugprintln("Reset command received via UART0. Restarting...");
+                sendStartStopMessage(false); // Ensure therapy is stopped before restart
+                vTaskDelay(pdMS_TO_TICKS(100)); // Short delay to ensure message is sent
+                ESP.restart();
+            }
+        }
+
+        static bool prevStartTherapyUpdate = startTherapyUpdate;
+        if(prevStartTherapyUpdate != startTherapyUpdate){
+            sendStartStopMessage(startTherapyUpdate);
+            prevStartTherapyUpdate = startTherapyUpdate;
+        }
         checkParameterSettling();
         processIncomingUART();
         if (skin_display)
@@ -1151,6 +1187,20 @@ void playAutoRepeatLoBeep()
     debugprintf("Auto-repeat beep played: %dHz for %dms\n", BEEP_AUTOREPEAT_FREQUENCY_LO, BEEP_AUTOREPEAT_DURATION);
 }
 
+void sendStartStopMessage(bool start)
+{
+    if (start)
+    {
+        Serial1.println("Start");
+        debugprintln("UART1 sent: THERAPY:ON");
+    }
+    else
+    {
+        Serial1.println("Stop");
+        debugprintln("UART1 sent: THERAPY:OFF");
+    }
+}
+
 void sendParameterUpdate(uint16_t param_index)
 {
     const char *param_names[] = {
@@ -1181,7 +1231,7 @@ void sendParameterUpdate(uint16_t param_index)
         break;
 
     case 2: // FreqCycle
-        snprintf(uart_message, sizeof(uart_message), "%s:%s", param_names[param_index], param.freq_cycling ? "ON" : "OFF");
+        snprintf(uart_message, sizeof(uart_message), "%s:%d", param_names[param_index], param.freq_cycling ? 1 : 0);
         break;
 
     case 3: // Frequency
@@ -1197,18 +1247,11 @@ void sendParameterUpdate(uint16_t param_index)
         break;
 
     case 6: // Filter
-        snprintf(uart_message, sizeof(uart_message), "%s:%s", param_names[param_index], param.filter ? "ON" : "OFF");
+        snprintf(uart_message, sizeof(uart_message), "%s:%d", param_names[param_index], param.filter ? 1 : 0);
         break;
 
     case 7: // Modulation
-        if (param.modulation == 0)
-        {
-            snprintf(uart_message, sizeof(uart_message), "%s:OFF", param_names[param_index]);
-        }
-        else
-        {
-            snprintf(uart_message, sizeof(uart_message), "%s:%d", param_names[param_index], param.modulation);
-        }
+        snprintf(uart_message, sizeof(uart_message), "%s:%d", param_names[param_index], param.modulation);
         break;
 
     default:
@@ -1996,6 +2039,7 @@ void audioPipNTimes(int times)
     for (int i = 0; i < times; i++)
     {
         tone(PIEZO_PIN, 4000, 50); // Short high pip
+        tone(PIEZO_PIN, 0, 50); // Short high pip
     }
 }
 
