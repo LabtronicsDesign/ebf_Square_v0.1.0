@@ -20,6 +20,8 @@ extern "C" {
 #include "ui_ChargingScreen.h"
 #include "ui_MainScreen.h"
 #include "ui_TherapyScreen.h"
+#include "ui_FilterScreen.h"
+#include "ui_SettingScreen.h"
 
 ///////////////////// VARIABLES ////////////////////
 
@@ -45,6 +47,7 @@ LV_IMG_DECLARE( ui_img_bluetooth_icon_png);   // assets/bluetooth icon.png
 LV_FONT_DECLARE( ui_font_Number_Medium);
 LV_FONT_DECLARE( ui_font_Number_Small);
 LV_FONT_DECLARE( ui_font_Number);
+LV_FONT_DECLARE( ui_font_Number_SMedium);
 
 // UI INIT
 void ui_init(void);

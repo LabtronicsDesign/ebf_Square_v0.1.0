@@ -1,6 +1,8 @@
 SET(SOURCES ui_ChargingScreen.c
     ui_MainScreen.c
     ui_TherapyScreen.c
+    ui_FilterScreen.c
+    ui_SettingScreen.c
     ui.c
     ui_comp_hook.c
     ui_helpers.c
@@ -19,6 +21,7 @@ SET(SOURCES ui_ChargingScreen.c
     ui_img_bluetooth_icon_png.c
     fonts/ui_font_Number_Medium.c
     fonts/ui_font_Number_Small.c
-    fonts/ui_font_Number.c)
+    fonts/ui_font_Number.c
+    fonts/ui_font_Number_SMedium.c)
 
 add_library(ui ${SOURCES})

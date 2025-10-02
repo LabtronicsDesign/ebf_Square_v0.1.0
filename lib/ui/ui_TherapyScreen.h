@@ -17,9 +17,9 @@ extern void ui_TherapyScreen_screen_destroy(void);
 extern lv_obj_t *ui_TherapyScreen;
 extern lv_obj_t *ui_Header2;
 extern lv_obj_t *ui_Header_Battery2;
-extern lv_obj_t *ui_Roller_Topic2;
 extern lv_obj_t *ui_Batt_Icon2;
 extern lv_obj_t *ui_BT_Icon2;
+extern lv_obj_t *ui_Roller_Topic2;
 extern lv_obj_t *ui_Start_Group2;
 extern lv_obj_t *ui_Start_Bg2;
 extern lv_obj_t *ui_Start_Num_Bg2;
@@ -47,6 +47,8 @@ extern lv_obj_t *ui_Text1;
 extern lv_obj_t *ui_Text2;
 extern lv_obj_t *ui_Text4;
 extern lv_obj_t *ui_Text5;
+extern lv_obj_t *ui_Text6;
+extern lv_obj_t *ui_Extra_Value3;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

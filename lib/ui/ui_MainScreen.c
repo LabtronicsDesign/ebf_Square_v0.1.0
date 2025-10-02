@@ -144,10 +144,10 @@ lv_obj_set_style_shadow_offset_y(ui_Value_Bg1, 30, LV_PART_MAIN| LV_STATE_DEFAUL
 ui_Freq_Text1 = lv_label_create(ui_MainScreen);
 lv_obj_set_width( ui_Freq_Text1, LV_SIZE_CONTENT);  /// 1
 lv_obj_set_height( ui_Freq_Text1, LV_SIZE_CONTENT);   /// 1
-lv_obj_set_x( ui_Freq_Text1, -198 );
+lv_obj_set_x( ui_Freq_Text1, -200 );
 lv_obj_set_y( ui_Freq_Text1, 89 );
 lv_obj_set_align( ui_Freq_Text1, LV_ALIGN_RIGHT_MID );
-lv_label_set_text(ui_Freq_Text1,"Freq:");
+lv_label_set_text(ui_Freq_Text1,"Freq");
 lv_obj_remove_flag( ui_Freq_Text1, LV_OBJ_FLAG_PRESS_LOCK | LV_OBJ_FLAG_CLICK_FOCUSABLE | LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_SNAPPABLE | LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_ELASTIC | LV_OBJ_FLAG_SCROLL_MOMENTUM | LV_OBJ_FLAG_SCROLL_CHAIN );    /// Flags
 lv_obj_set_style_text_color(ui_Freq_Text1, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT );
 lv_obj_set_style_text_opa(ui_Freq_Text1, 255, LV_PART_MAIN| LV_STATE_DEFAULT);
