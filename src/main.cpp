@@ -68,6 +68,9 @@
 // UART parameter reporting configuration
 #define PARAM_SETTLE_DELAY 200 // ms - wait time after last change before sending UART message
 
+// Idle timeout configuration
+#define IDLE_TIMEOUT 30000 // ms - 30 seconds of inactivity before entering standby mode
+
 // BLE UUIDs
 #define SERVICE_UUID "7ece5c94-6705-4551-9704-c8a6b848897f"
 
@@ -164,6 +167,10 @@ struct ButtonState
     bool auto_repeating;
 } button_states_tracker[4] = {0};
 
+// Standby mode tracking
+bool in_standby_mode = false;
+uint32_t last_activity_time = 0;
+
 parameter_block_t param = {
     .strength = 10,
     .freq_cycling = 0,
@@ -207,6 +214,8 @@ void sendStartStopMessage(bool start);
 void sendParameterUpdate(uint16_t param_index);
 void checkParameterSettling();
 void notifyParameterChange(uint16_t param_index, bool is_auto_repeat);
+void enterStandbyMode();
+void checkIdleTimeout();
 void beep(int duration);
 void beepLow(int duration);
 void beepPeriodic(int duration, int period);
@@ -379,7 +388,6 @@ void taskDisplay(void *pvParameters)
 
     tft.begin();        /* TFT init */
     tft.setRotation(2); /* Landscape orientation, flipped */
-    tft.fillScreen(TFT_BLUE);
     digitalWrite(BL_CTRL_PIN, HIGH);
 
     static lv_disp_t *disp;
@@ -399,7 +407,7 @@ void taskDisplay(void *pvParameters)
 
     initializeParameterDisplay();
     lv_timer_handler();
-    vTaskDelay(pdMS_TO_TICKS(2000)); // Short delay to ensure display is ready
+    vTaskDelay(pdMS_TO_TICKS(500)); // Short delay to ensure display is ready
 
     for (;;)
     {
@@ -408,11 +416,8 @@ void taskDisplay(void *pvParameters)
         bleStateFunc();
         therapyModeFunc();
         processButtonEvents();
-        // every 1000ms
-        //  uint32_t now = millis();
-        //  if(now % 1000 == 0) {
+        checkIdleTimeout(); // Check for idle timeout on MainScreen
         updateReadingsDisplay();
-        // }
 
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(5));
@@ -575,11 +580,15 @@ void bleStateFunc()
         {
             lv_obj_clear_flag(ui_BT_Icon1, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(ui_BT_Icon2, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(ui_BT_Icon3, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(ui_BT_Icon4, LV_OBJ_FLAG_HIDDEN);
         }
         else
         {
             lv_obj_add_flag(ui_BT_Icon1, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(ui_BT_Icon2, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(ui_BT_Icon3, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(ui_BT_Icon4, LV_OBJ_FLAG_HIDDEN);
         }
         playBeep();
     }
@@ -652,6 +661,14 @@ void chargeStateFunc()
             {
                 lv_obj_add_flag(ui_Header_Battery2, LV_OBJ_FLAG_HIDDEN);
             }
+            if (ui_Header_Battery3)
+            {
+                lv_obj_add_flag(ui_Header_Battery3, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (ui_Header_Battery4)
+            {
+                lv_obj_add_flag(ui_Header_Battery4, LV_OBJ_FLAG_HIDDEN);
+            }
             debugprintln("Battery text hidden - charging/full state");
         }
         else
@@ -664,6 +681,14 @@ void chargeStateFunc()
             if (ui_Header_Battery2)
             {
                 lv_obj_clear_flag(ui_Header_Battery2, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (ui_Header_Battery3)
+            {
+                lv_obj_clear_flag(ui_Header_Battery3, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (ui_Header_Battery4)
+            {
+                lv_obj_clear_flag(ui_Header_Battery4, LV_OBJ_FLAG_HIDDEN);
             }
 
             // Update battery percentage display
@@ -685,6 +710,14 @@ void chargeStateFunc()
             {
                 lv_label_set_text(ui_Header_Battery2, battery_text);
             }
+            if (ui_Header_Battery3)
+            {
+                lv_label_set_text(ui_Header_Battery3, battery_text);
+            }
+            if (ui_Header_Battery4)
+            {
+                lv_label_set_text(ui_Header_Battery4, battery_text);
+            }
             debugprintf("Battery text shown: %s\n", battery_text);
         }
 
@@ -703,6 +736,20 @@ void chargeStateFunc()
             lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_3);
             lv_obj_clear_state(ui_Batt_Icon2, LV_STATE_USER_4);
         }
+        if (ui_Batt_Icon3)
+        {
+            lv_obj_clear_state(ui_Batt_Icon3, LV_STATE_USER_1);
+            lv_obj_clear_state(ui_Batt_Icon3, LV_STATE_USER_2);
+            lv_obj_clear_state(ui_Batt_Icon3, LV_STATE_USER_3);
+            lv_obj_clear_state(ui_Batt_Icon3, LV_STATE_USER_4);
+        }
+        if (ui_Batt_Icon4)
+        {
+            lv_obj_clear_state(ui_Batt_Icon4, LV_STATE_USER_1);
+            lv_obj_clear_state(ui_Batt_Icon4, LV_STATE_USER_2);
+            lv_obj_clear_state(ui_Batt_Icon4, LV_STATE_USER_3);
+            lv_obj_clear_state(ui_Batt_Icon4, LV_STATE_USER_4);
+        }
 
         // Set the appropriate state based on battery_icon_state
         switch (battery_icon_state)
@@ -712,24 +759,40 @@ void chargeStateFunc()
                 lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_1);
             if (ui_Batt_Icon2)
                 lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_1);
+            if (ui_Batt_Icon3)
+                lv_obj_add_state(ui_Batt_Icon3, LV_STATE_USER_1);
+            if (ui_Batt_Icon4)
+                lv_obj_add_state(ui_Batt_Icon4, LV_STATE_USER_1);
             break;
         case 1: // Medium battery (31-80%) - USER_2
             if (ui_Batt_Icon1)
                 lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_2);
             if (ui_Batt_Icon2)
                 lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_2);
+            if (ui_Batt_Icon3)
+                lv_obj_add_state(ui_Batt_Icon3, LV_STATE_USER_2);
+            if (ui_Batt_Icon4)
+                lv_obj_add_state(ui_Batt_Icon4, LV_STATE_USER_2);
             break;
         case 2: // High battery (81-100%) - USER_3
             if (ui_Batt_Icon1)
                 lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_3);
             if (ui_Batt_Icon2)
                 lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_3);
+            if (ui_Batt_Icon3)
+                lv_obj_add_state(ui_Batt_Icon3, LV_STATE_USER_3);
+            if (ui_Batt_Icon4)
+                lv_obj_add_state(ui_Batt_Icon4, LV_STATE_USER_3);
             break;
         case 3: // Charging/Full - USER_4
             if (ui_Batt_Icon1)
                 lv_obj_add_state(ui_Batt_Icon1, LV_STATE_USER_4);
             if (ui_Batt_Icon2)
                 lv_obj_add_state(ui_Batt_Icon2, LV_STATE_USER_4);
+            if (ui_Batt_Icon3)
+                lv_obj_add_state(ui_Batt_Icon3, LV_STATE_USER_4);
+            if (ui_Batt_Icon4)
+                lv_obj_add_state(ui_Batt_Icon4, LV_STATE_USER_4);
             break;
         }
 
@@ -738,6 +801,18 @@ void chargeStateFunc()
             playBeep();
         prev_battery_state = current_battery_state;
         prev_battery_percentage = batteryPercentage;
+    }
+
+    // Check if device was unplugged while in standby mode on charging screen
+    lv_obj_t *current_screen = lv_scr_act();
+    if (in_standby_mode && current_screen == ui_ChargingScreen)
+    {
+        // If device is no longer charging or full, enter full standby mode
+        if (!charging && !full)
+        {
+            debugprintln("Device unplugged while in charging screen standby - entering full standby mode");
+            enterStandbyMode();
+        }
     }
 }
 
@@ -771,6 +846,10 @@ void onOffSliderFunc()
                 updateParameterDisplay();
 
                 startTherapyUpdate = true;
+
+                // Initialize idle timer when entering MainScreen
+                last_activity_time = millis();
+                in_standby_mode = false;
             }
             // lv_scr_load_anim(ui_MainScreen, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
         }
@@ -853,6 +932,10 @@ void therapyModeFunc()
                 {
                     lv_scr_load(ui_MainScreen);
                     debugprintln("Loaded MainScreen");
+
+                    // Initialize idle timer when entering MainScreen
+                    last_activity_time = millis();
+                    in_standby_mode = false;
                 }
             }
         }
@@ -1222,6 +1305,86 @@ void sendStartStopMessage(bool start)
     {
         Serial1.println("Stop");
         debugprintln("UART1 sent: THERAPY:OFF");
+    }
+}
+
+void enterStandbyMode()
+{
+    debugprintln("Entering standby mode...");
+
+    // Send stop message to therapy device
+    sendStartStopMessage(false);
+
+    // Clear the screen
+    lv_obj_clean(lv_scr_act());
+
+    // Turn off backlight
+    digitalWrite(BL_CTRL_PIN, LOW);
+
+    // Set standby flag
+    in_standby_mode = true;
+
+    debugprintln("Entering deep sleep mode...");
+
+    // Configure wake-up on any button press
+    esp_sleep_enable_ext1_wakeup(
+        (1ULL << BUTTON1) | (1ULL << BUTTON2) | (1ULL << BUTTON3) | (1ULL << BUTTON4),
+        ESP_EXT1_WAKEUP_ANY_LOW // Wake when any button goes LOW (pressed)
+    );
+
+    // Enter deep sleep mode
+    esp_deep_sleep_start();
+}
+
+void checkIdleTimeout()
+{
+    // Only check timeout on MainScreen and when not in standby
+    lv_obj_t *current_screen = lv_scr_act();
+    if (current_screen != ui_MainScreen || in_standby_mode)
+    {
+        return;
+    }
+
+    uint32_t current_time = millis();
+
+    // Check if any button is currently pressed
+    bool any_button_pressed = false;
+    for (int i = 0; i < 4; i++)
+    {
+        if (button_states_tracker[i].is_pressed)
+        {
+            any_button_pressed = true;
+            break;
+        }
+    }
+
+    // Update activity time if a button is pressed
+    if (any_button_pressed)
+    {
+        last_activity_time = current_time;
+    }
+
+    // Check if idle timeout has been reached
+    if (last_activity_time > 0 && (current_time - last_activity_time) >= IDLE_TIMEOUT)
+    {
+        // Check if device is charging
+        bool charging = chargeBattStatus && !fullBattStatus;
+        bool full = !chargeBattStatus && fullBattStatus;
+
+        if (charging || full)
+        {
+            // Device is charging - go to charging screen but don't enter deep sleep
+            debugprintln("Idle timeout reached while charging - switching to charging screen");
+            sendStartStopMessage(false);
+            lv_scr_load(ui_ChargingScreen);
+            in_standby_mode = true; // Set flag but don't enter deep sleep
+            debugprintln("On charging screen in standby mode");
+        }
+        else
+        {
+            // Device not charging - enter full standby mode with deep sleep
+            enterStandbyMode();
+        }
     }
 }
 
@@ -2003,6 +2166,9 @@ void updateParameterDisplay()
         button3 = ui_ButtonMidRight3; // BUTTON3
         button4 = ui_ButtonRight3;    // BUTTON4
     }
+    else if(current_screen == ui_ChargingScreen){
+        return; // On charging screen, no roller or parameters to update
+    }
     else{
         return; // Not on a screen with a roller, exit the function
     }
@@ -2274,7 +2440,6 @@ void processButtonEvents()
         {
             prev_states = current_states;
             first_run = false;
-            return;
         }
 
         // Get current screen
@@ -2288,11 +2453,12 @@ void processButtonEvents()
             lv_obj_t *main_btn;
             lv_obj_t *therapy_btn;
             lv_obj_t *filter_btn;
+            lv_obj_t *settings_btn;
         } buttons[] = {
-            {0, "BTN1", ui_ButtonLeft1, ui_ButtonLeft2, ui_ButtonLeft3},
-            {1, "BTN2", ui_ButtonMidLeft1, ui_ButtonMidLeft2, ui_ButtonMidLeft3},
-            {2, "BTN3", ui_ButtonMidRight1, ui_ButtonMidRight2, ui_ButtonMidRight3},
-            {3, "BTN4", ui_ButtonRight1, ui_ButtonRight2, ui_ButtonRight3}};
+            {0, "BTN1", ui_ButtonLeft1, ui_ButtonLeft2, ui_ButtonLeft3, ui_ButtonLeft4},
+            {1, "BTN2", ui_ButtonMidLeft1, ui_ButtonMidLeft2, ui_ButtonMidLeft3, ui_ButtonMidLeft4},
+            {2, "BTN3", ui_ButtonMidRight1, ui_ButtonMidRight2, ui_ButtonMidRight3, ui_ButtonMidRight4},
+            {3, "BTN4", ui_ButtonRight1, ui_ButtonRight2, ui_ButtonRight3, ui_ButtonRight4}};
 
         // Process each button for state changes
         for (int i = 0; i < 4; i++)
@@ -2309,9 +2475,17 @@ void processButtonEvents()
                     debugprintf("%s-PRESS on %s\n", buttons[i].name,
                                 (current_screen == ui_MainScreen) ? "MainScreen" :
                                 (current_screen == ui_TherapyScreen) ? "TherapyScreen" :
-                                (current_screen == ui_FilterScreen) ? "FilterScreen" : "Unknown");
+                                (current_screen == ui_FilterScreen) ? "FilterScreen" :
+                                (current_screen == ui_SettingScreen) ? "SettingScreen" :
+                                (current_screen == ui_ChargingScreen) ? "ChargingScreen" : "Unknown");
 
-                    
+                    // Check if in standby mode (on charging screen) - restart device on any button press
+                    if (in_standby_mode && current_screen == ui_ChargingScreen)
+                    {
+                        debugprintln("Button pressed in charging standby mode - restarting device...");
+                        ESP.restart();
+                        return; // This line won't execute but included for clarity
+                    }
 
                     // Update button state tracking
                     button_states_tracker[i].is_pressed = true;
@@ -2334,6 +2508,11 @@ void processButtonEvents()
                         { // BUTTON2 - Roller DOWN
                             adjustRoller(ui_Roller_Topic1, false);
                             updateParameterDisplay(); // Update display after roller change
+                            playBeep();
+                        }
+                        else if (i == 2 && lv_roller_get_selected(ui_Roller_Topic1) == 0)
+                        { // BUTTON3 - Enter Settings if on Settings
+                            lv_scr_load(ui_SettingScreen);
                             playBeep();
                         }
                         else if (i == 2)
@@ -2406,6 +2585,29 @@ void processButtonEvents()
                             else playBeep();
                         }
                     }
+                    else if (current_screen == ui_SettingScreen)
+                    {
+                        handleButtonPress(buttons[i].settings_btn);
+                        if (i == 0)
+                        { // BUTTON1 - Return to MainScreen
+                            lv_scr_load(ui_MainScreen);
+                            playBeep();
+                        }
+                        else if (i == 1)
+                        { // BUTTON2 - Settings Roller DOWN
+                            adjustRoller(ui_Roller_Topic6, false);
+                            updateParameterDisplay(); // Update display after roller change
+                            playBeep();
+                        }
+                        else if (i == 2)
+                        { // BUTTON3 - Increase Parameter
+                            playBeep();
+                        }
+                        else if (i == 3)
+                        { // BUTTON4 - Decrease Parameter
+                            playBeep();
+                        }
+                    }
                 }
 
                 // Button release detected (LOW -> HIGH)
@@ -2431,6 +2633,10 @@ void processButtonEvents()
                     else if (current_screen == ui_FilterScreen)
                     {
                         handleButtonRelease(buttons[i].filter_btn);
+                    }
+                    else if (current_screen == ui_SettingScreen)
+                    {
+                        handleButtonRelease(buttons[i].settings_btn);
                     }
                 }
             }
@@ -2622,6 +2828,10 @@ void processButtonEvents()
                 }
             }
         }
+    }
+    else if (current_screen == ui_SettingScreen)
+    {
+        // No auto-repeat on SettingScreen as it has no adjustable parameters
     }
 }
 
