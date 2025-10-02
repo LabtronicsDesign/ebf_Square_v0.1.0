@@ -159,6 +159,7 @@ lv_obj_set_height( ui_ButtonMidLeft3, lv_pct(300));
 lv_obj_set_y( ui_ButtonMidLeft3, 0 );
 lv_obj_set_x( ui_ButtonMidLeft3, lv_pct(-15) );
 lv_obj_set_align( ui_ButtonMidLeft3, LV_ALIGN_CENTER );
+lv_obj_add_state( ui_ButtonMidLeft3, LV_STATE_USER_1 );     /// States
 lv_obj_remove_flag( ui_ButtonMidLeft3, LV_OBJ_FLAG_PRESS_LOCK | LV_OBJ_FLAG_CLICK_FOCUSABLE | LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_SNAPPABLE | LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_ELASTIC | LV_OBJ_FLAG_SCROLL_MOMENTUM | LV_OBJ_FLAG_SCROLL_CHAIN );    /// Flags
 lv_obj_set_style_bg_image_src( ui_ButtonMidLeft3, &ui_img_2022142161, LV_PART_MAIN | LV_STATE_DEFAULT );
 lv_obj_set_style_bg_image_recolor(ui_ButtonMidLeft3, lv_color_hex(0x14191E), LV_PART_MAIN| LV_STATE_DEFAULT);

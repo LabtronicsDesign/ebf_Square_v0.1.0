@@ -53,6 +53,7 @@
 // Auto-repeat configuration
 #define AUTO_REPEAT_INITIAL_DELAY 500 // ms before auto-repeat starts
 #define AUTO_REPEAT_INTERVAL 100      // ms between auto-repeats
+#define AUTO_REPEAT_FAST_DELAY 2000   // ms after auto-repeat starts to switch to step size 10
 
 // Battery reading interval
 #define BATTERY_READ_INTERVAL 5000 // Read battery every 5 seconds
@@ -191,7 +192,7 @@ void IRAM_ATTR buttonFunc();
 void handleButtonPress(lv_obj_t *btn);
 void handleButtonRelease(lv_obj_t *btn);
 void adjustRoller(lv_obj_t *roller, bool up);
-void adjustParameter(bool increase);
+bool adjustParameter(bool increase, uint8_t step);
 void updateReadingsDisplay();
 void updateParameterDisplay();
 void processButtonEvents();
@@ -397,6 +398,7 @@ void taskDisplay(void *pvParameters)
     ui_init();
 
     initializeParameterDisplay();
+    lv_timer_handler();
     vTaskDelay(pdMS_TO_TICKS(2000)); // Short delay to ensure display is ready
 
     for (;;)
@@ -801,20 +803,42 @@ void therapyModeFunc()
         lv_obj_t *current_screen = lv_scr_act();
 
         // Only switch screens when on MainScreen or TherapyScreen
-        if (current_screen == ui_MainScreen || current_screen == ui_TherapyScreen)
+        if (current_screen != ui_ChargingScreen)
         {
             if (therapy)
             {
-                // Switch to TherapyScreen
-                debugprintf("Therapy mode activated - switching to TherapyScreen\n");
-                if (ui_TherapyScreen == NULL)
+                if(param.filter == 1 || param.freq_cycling == 1) // if filter or frequency cycling is ON, go to filter screen
                 {
-                    debugprintln("ui_TherapyScreen is NULL!");
+                    debugprintf("Filter mode activated - switching to FilterScreen\n");
+                    if(ui_FilterScreen == NULL)
+                    {
+                        debugprintln("ui_FilterScreen is NULL!");
+                    }
+                    else
+                    {
+                        if(param.filter == 1){
+                            //set ui_Bar1 to 100
+                            lv_bar_set_value(ui_Bar1, 100, LV_ANIM_OFF);
+                        }
+                        else{
+                            //set ui_Bar1 to 0
+                            lv_bar_set_value(ui_Bar1, 0, LV_ANIM_OFF);
+                        }
+                        lv_scr_load(ui_FilterScreen);
+                        debugprintln("Loaded FilterScreen");
+                    }
                 }
-                else
-                {
-                    lv_scr_load(ui_TherapyScreen);
-                    debugprintln("Loaded TherapyScreen");
+                else{// Switch to TherapyScreen
+                    debugprintf("Therapy mode activated - switching to TherapyScreen\n");
+                    if (ui_TherapyScreen == NULL)
+                    {
+                        debugprintln("ui_TherapyScreen is NULL!");
+                    }
+                    else  
+                    {
+                        lv_scr_load(ui_TherapyScreen);
+                        debugprintln("Loaded TherapyScreen");
+                    }
                 }
             }
             else
@@ -1335,28 +1359,37 @@ void adjustRoller(lv_obj_t *roller, bool up)
 
     uint16_t current = lv_roller_get_selected(roller);
     uint16_t option_count = lv_roller_get_option_count(roller);
+    uint16_t new_selected;
 
     if (up)
     {
-        uint16_t new_selected = (current == 0) ? option_count - 1 : current - 1;
-        lv_roller_set_selected(roller, new_selected, LV_ANIM_ON);
+        new_selected = (current == 0) ? option_count - 1 : current - 1;
     }
     else
     {
-        uint16_t new_selected = (current + 1) % option_count;
-        lv_roller_set_selected(roller, new_selected, LV_ANIM_ON);
+        new_selected = (current + 1) % option_count;
     }
+
+    // Update all three rollers to keep them synchronized
+    if (ui_Roller_Topic1)
+        lv_roller_set_selected(ui_Roller_Topic1, new_selected, LV_ANIM_ON);
+    if (ui_Roller_Topic2)
+        lv_roller_set_selected(ui_Roller_Topic2, new_selected, LV_ANIM_ON);
+    if (ui_Roller_Topic3)
+        lv_roller_set_selected(ui_Roller_Topic3, new_selected, LV_ANIM_ON);
 }
 
 // Adjust parameter based on current roller selection
-void adjustParameter(bool increase)
+// Returns true if parameter was changed, false if it hit a limit
+bool adjustParameter(bool increase, uint8_t step)
 {
     lv_obj_t *current_screen = lv_scr_act();
+    bool param_changed = false; // Track if parameter actually changed
+
     if (current_screen == ui_MainScreen)
     {
 
         uint16_t selected = lv_roller_get_selected(ui_Roller_Topic1);
-        bool param_changed = false;
 
         switch (selected)
         {
@@ -1369,7 +1402,7 @@ void adjustParameter(bool increase)
             {
                 if (param.strength < STRENGTH_MAX)
                 {
-                    param.strength++;
+                    param.strength = min(param.strength + step, STRENGTH_MAX);
                     param_changed = true;
                 }
             }
@@ -1377,7 +1410,7 @@ void adjustParameter(bool increase)
             {
                 if (param.strength > STRENGTH_MIN)
                 {
-                    param.strength--;
+                    param.strength = max((uint16_t)STRENGTH_MIN, (uint16_t)(param.strength - step));
                     param_changed = true;
                 }
             }
@@ -1409,7 +1442,7 @@ void adjustParameter(bool increase)
             {
                 if (param.base_freq < FREQ_MAX)
                 {
-                    param.base_freq++;
+                    param.base_freq = min(param.base_freq + step, FREQ_MAX);
                     param_changed = true;
                 }
             }
@@ -1417,7 +1450,7 @@ void adjustParameter(bool increase)
             {
                 if (param.base_freq > FREQ_MIN)
                 {
-                    param.base_freq--;
+                    param.base_freq = max((uint16_t)FREQ_MIN, (uint16_t)(param.base_freq - step));
                     param_changed = true;
                 }
             }
@@ -1445,11 +1478,18 @@ void adjustParameter(bool increase)
             break;
 
         case 5: // Interval Gap (10-80)
+            // Cannot adjust interval gap when intensity is 1
+            if (param.intensity == 1)
+            {
+                debugprintln("Cannot adjust Interval Gap when Intensity is 1");
+                break;
+            }
+
             if (increase)
             {
                 if (param.interval_gap < Z_MAX)
                 {
-                    param.interval_gap++;
+                    param.interval_gap = min(param.interval_gap + step, Z_MAX);
                     param_changed = true;
                 }
             }
@@ -1457,7 +1497,7 @@ void adjustParameter(bool increase)
             {
                 if (param.interval_gap > Z_MIN)
                 {
-                    param.interval_gap--;
+                    param.interval_gap = max((uint16_t)Z_MIN, (uint16_t)(param.interval_gap - step));
                     param_changed = true;
                 }
             }
@@ -1530,25 +1570,352 @@ void adjustParameter(bool increase)
     {
         // On TherapyScreen, BUTTON3 increases intensity, BUTTON4 decreases intensity
         uint16_t selected = lv_roller_get_selected(ui_Roller_Topic2);
+
+        switch (selected)
+        {
+        case 0: // Settings - no parameter to adjust
+            debugprintln("Settings selected - no parameter to adjust");
+            break;
+
+        case 1: // Strength (10-100)
+            if (increase)
+            {
+                if (param.strength < STRENGTH_MAX)
+                {
+                    param.strength = min(param.strength + step, STRENGTH_MAX);
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.strength > STRENGTH_MIN)
+                {
+                    param.strength = max((uint16_t)STRENGTH_MIN, (uint16_t)(param.strength - step));
+                    param_changed = true;
+                }
+            }
+            debugprintf("Strength: %d\n", param.strength);
+            break;
+
+        case 2: // Freq Cycle (0 or 1) - Toggle ON/OFF
+            if (increase)
+            {
+                if (param.freq_cycling < 1)
+                {
+                    param.freq_cycling++;
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.freq_cycling > 0)
+                {
+                    param.freq_cycling--;
+                    param_changed = true;
+                }
+            }
+            debugprintf("Freq Cycling: %s\n", param.freq_cycling ? "ON" : "OFF");
+            break;
+
+        case 3: // Frequency (15-350)
+            if (increase)
+            {
+                if (param.base_freq < FREQ_MAX)
+                {
+                    param.base_freq = min(param.base_freq + step, FREQ_MAX);
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.base_freq > FREQ_MIN)
+                {
+                    param.base_freq = max((uint16_t)FREQ_MIN, (uint16_t)(param.base_freq - step));
+                    param_changed = true;
+                }
+            }
+            debugprintf("Base Frequency: %d Hz\n", param.base_freq);
+            break;
+
+        case 4: // Intensity (1-8)
+            if (increase)
+            {
+                if (param.intensity < INTENSITY_MAX)
+                {
+                    param.intensity++;
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.intensity > INTENSITY_MIN)
+                {
+                    param.intensity--;
+                    param_changed = true;
+                }
+            }
+            debugprintf("Intensity: %d\n", param.intensity);
+            break;
+
+        case 5: // Interval Gap (10-80)
+            // Cannot adjust interval gap when intensity is 1
+            if (param.intensity == 1)
+            {
+                debugprintln("Cannot adjust Interval Gap when Intensity is 1");
+                break;
+            }
+
+            if (increase)
+            {
+                if (param.interval_gap < Z_MAX)
+                {
+                    param.interval_gap = min(param.interval_gap + step, Z_MAX);
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.interval_gap > Z_MIN)
+                {
+                    param.interval_gap = max((uint16_t)Z_MIN, (uint16_t)(param.interval_gap - step));
+                    param_changed = true;
+                }
+            }
+            debugprintf("Interval Gap: %d\n", param.interval_gap);
+            break;
+
+        case 6: // Filter (0 or 1) - Toggle ON/OFF
+            if (increase)
+            {
+                if (param.filter < 1)
+                {
+                    param.filter++;
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.filter > 0)
+                {
+                    param.filter--;
+                    param_changed = true;
+                }
+            }
+            debugprintf("Filter: %s\n", param.filter ? "ON" : "OFF");
+            break;
+
+        case 7: // Modulation (0-5)
+            if (increase)
+            {
+                if (param.modulation < MODULATION_MAX)
+                {
+                    param.modulation++;
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.modulation > MODULATION_MIN)
+                {
+                    param.modulation--;
+                    param_changed = true;
+                }
+            }
+            debugprintf("Modulation: %d\n", param.modulation);
+            break;
+
+        default:
+            debugprintln("Unknown roller selection");
+            break;
+        }
+
+        // Notify parameter change if something actually changed
+        if (param_changed)
+        {
+            // Check if we're in auto-repeat mode by looking at button state
+            bool is_auto_repeat = false;
+            for (int i = 2; i < 4; i++)
+            { // Check BUTTON3 and BUTTON4
+                if (button_states_tracker[i].auto_repeating)
+                {
+                    is_auto_repeat = true;
+                    break;
+                }
+            }
+
+            notifyParameterChange(selected, is_auto_repeat);
+        }
+    }
+    else if (current_screen == ui_FilterScreen)
+    {
+        // On FilterScreen, BUTTON3 increases intensity, BUTTON4 decreases intensity
+        uint16_t selected = lv_roller_get_selected(ui_Roller_Topic3);
         bool param_changed = false;
-        // Strength (10-100)
-        if (increase)
+
+        switch (selected)
         {
-            if (param.strength < STRENGTH_MAX)
+        case 0: // Settings - no parameter to adjust
+            debugprintln("Settings selected - no parameter to adjust");
+            break;
+
+        case 1: // Strength (10-100)
+            if (increase)
             {
-                param.strength++;
-                param_changed = true;
+                if (param.strength < STRENGTH_MAX)
+                {
+                    param.strength = min(param.strength + step, STRENGTH_MAX);
+                    param_changed = true;
+                }
             }
-        }
-        else
-        {
-            if (param.strength > STRENGTH_MIN)
+            else
             {
-                param.strength--;
-                param_changed = true;
+                if (param.strength > STRENGTH_MIN)
+                {
+                    param.strength = max((uint16_t)STRENGTH_MIN, (uint16_t)(param.strength - step));
+                    param_changed = true;
+                }
             }
+            debugprintf("Strength: %d\n", param.strength);
+            break;
+
+        case 2: // Freq Cycle (0 or 1) - Toggle ON/OFF
+            if (increase)
+            {
+                if (param.freq_cycling < 1)
+                {
+                    param.freq_cycling++;
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.freq_cycling > 0)
+                {
+                    param.freq_cycling--;
+                    param_changed = true;
+                }
+            }
+            debugprintf("Freq Cycling: %s\n", param.freq_cycling ? "ON" : "OFF");
+            break;
+
+        case 3: // Frequency (15-350)
+            // Cannot adjust frequency when frequency cycling is 1
+            if (param.freq_cycling == 1)
+            {
+                debugprintln("Cannot adjust Frequency when Frequency Cycling is 1");
+                break;
+            }
+            if (increase)
+            {
+                if (param.base_freq < FREQ_MAX)
+                {
+                    param.base_freq = min(param.base_freq + step, FREQ_MAX);
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.base_freq > FREQ_MIN)
+                {
+                    param.base_freq = max((uint16_t)FREQ_MIN, (uint16_t)(param.base_freq - step));
+                    param_changed = true;
+                }
+            }
+            debugprintf("Base Frequency: %d Hz\n", param.base_freq);
+            break;
+
+        case 4: // Intensity (1-8)
+            if (increase)
+            {
+                if (param.intensity < INTENSITY_MAX)
+                {
+                    param.intensity++;
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.intensity > INTENSITY_MIN)
+                {
+                    param.intensity--;
+                    param_changed = true;
+                }
+            }
+            debugprintf("Intensity: %d\n", param.intensity);
+            break;
+
+        case 5: // Interval Gap (10-80)
+            // Cannot adjust interval gap when intensity is 1
+            if (param.intensity == 1)
+            {
+                debugprintln("Cannot adjust Interval Gap when Intensity is 1");
+                break;
+            }
+
+            if (increase)
+            {
+                if (param.interval_gap < Z_MAX)
+                {
+                    param.interval_gap = min(param.interval_gap + step, Z_MAX);
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.interval_gap > Z_MIN)
+                {
+                    param.interval_gap = max((uint16_t)Z_MIN, (uint16_t)(param.interval_gap - step));
+                    param_changed = true;
+                }
+            }
+            debugprintf("Interval Gap: %d\n", param.interval_gap);
+            break;
+
+        case 6: // Filter (0 or 1) - Toggle ON/OFF
+            if (increase)
+            {
+                if (param.filter < 1)
+                {
+                    param.filter++;
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.filter > 0)
+                {
+                    param.filter--;
+                    param_changed = true;
+                }
+            }
+            debugprintf("Filter: %s\n", param.filter ? "ON" : "OFF");
+            break;
+
+        case 7: // Modulation (0-5)
+            if (increase)
+            {
+                if (param.modulation < MODULATION_MAX)
+                {
+                    param.modulation++;
+                    param_changed = true;
+                }
+            }
+            else
+            {
+                if (param.modulation > MODULATION_MIN)
+                {
+                    param.modulation--;
+                    param_changed = true;
+                }
+            }
+            debugprintf("Modulation: %d\n", param.modulation);
+            break;
+
+        default:
+            debugprintln("Unknown roller selection");
+            break;
         }
-        debugprintf("Strength: %d\n", param.strength);
+
         // Notify parameter change if something actually changed
         if (param_changed)
         {
@@ -1568,73 +1935,119 @@ void adjustParameter(bool increase)
     }
     // Update the display after parameter change
     updateParameterDisplay();
+    return param_changed; // Return whether parameter was successfully changed
 }
 
 void updateReadingsDisplay()
 {
     lv_obj_t *current_screen = lv_scr_act();
-    if (current_screen != ui_TherapyScreen)
-        return;
-
     char buffer[16];
-    lv_snprintf(buffer, sizeof(buffer), "%d", this_width);
-    if (ui_Label_Current)
-        lv_label_set_text(ui_Label_Current, buffer);
-    lv_snprintf(buffer, sizeof(buffer), "%d", initial_width);
-    if (ui_Label_Initial)
-        lv_label_set_text(ui_Label_Initial, buffer);
-    lv_snprintf(buffer, sizeof(buffer), "%d", delta_width);
-    if (ui_Extra_Value1)
-        lv_label_set_text(ui_Extra_Value1, buffer);
-    lv_snprintf(buffer, sizeof(buffer), "%d", response);
-    if (ui_Label_Response)
-        lv_label_set_text(ui_Label_Response, buffer);
-    lv_snprintf(buffer, sizeof(buffer), "%d", local_rings);
-    if (ui_Extra_Value2)
-        lv_label_set_text(ui_Extra_Value2, buffer);
+
+    if (current_screen == ui_TherapyScreen)
+    {
+        lv_snprintf(buffer, sizeof(buffer), "%d", this_width);
+        if (ui_Label_Current)
+            lv_label_set_text(ui_Label_Current, buffer);
+        lv_snprintf(buffer, sizeof(buffer), "%d", initial_width);
+        if (ui_Label_Initial)
+            lv_label_set_text(ui_Label_Initial, buffer);
+        lv_snprintf(buffer, sizeof(buffer), "%d", delta_width);
+        if (ui_Extra_Value1)
+            lv_label_set_text(ui_Extra_Value1, buffer);
+        lv_snprintf(buffer, sizeof(buffer), "%d", response);
+        if (ui_Label_Response)
+            lv_label_set_text(ui_Label_Response, buffer);
+        lv_snprintf(buffer, sizeof(buffer), "%d", local_rings);
+        if (ui_Extra_Value2)
+            lv_label_set_text(ui_Extra_Value2, buffer);
+        lv_snprintf(buffer, sizeof(buffer), "%ds", seconds);
+        if (ui_Extra_Value3)
+            lv_label_set_text(ui_Extra_Value3, buffer);
+    }
+    else if (current_screen == ui_FilterScreen)
+    {
+        lv_snprintf(buffer, sizeof(buffer), "%ds", seconds);
+        if (ui_Extra_Value6)
+            lv_label_set_text(ui_Extra_Value6, buffer);
+        //map no_info to 0-100 for the bar
+        uint16_t bar_value = map(no_info, 15, 350, 0, 100);
+        if (ui_Bar1)
+            lv_bar_set_value(ui_Bar1, bar_value, LV_ANIM_OFF); //here no_info is actually freq cycle current frequency
+    }
 }
 
 // Update the display with current parameter values
 void updateParameterDisplay()
 {
-    if (!ui_Roller_Topic1)
-        return;
+    // Get current screen
+    lv_obj_t *current_screen = lv_scr_act();
 
-    uint16_t selected = lv_roller_get_selected(ui_Roller_Topic1);
+    uint16_t selected;
+    lv_obj_t *button3 = NULL; // BUTTON3
+    lv_obj_t *button4 = NULL; // BUTTON4
+    if(current_screen == ui_MainScreen){
+        if(ui_Roller_Topic1 != NULL) // Ensure the object exists
+            selected = lv_roller_get_selected(ui_Roller_Topic1);
+        button3 = ui_ButtonMidRight1; // BUTTON3
+        button4 = ui_ButtonRight1;    // BUTTON4
+    }
+    else if(current_screen == ui_TherapyScreen){
+        if(ui_Roller_Topic2 != NULL) // Ensure the object exists
+            selected = lv_roller_get_selected(ui_Roller_Topic2);
+        button3 = ui_ButtonMidRight2; // BUTTON3
+        button4 = ui_ButtonRight2;    // BUTTON4
+    }
+    else if(current_screen == ui_FilterScreen){
+        if(ui_Roller_Topic3 != NULL) // Ensure the object exists
+            selected = lv_roller_get_selected(ui_Roller_Topic3);
+        button3 = ui_ButtonMidRight3; // BUTTON3
+        button4 = ui_ButtonRight3;    // BUTTON4
+    }
+    else{
+        return; // Not on a screen with a roller, exit the function
+    }
     char buffer[16];
     uint16_t arc_value = 0;
 
     // Update BUTTON3 and BUTTON4 states based on roller selection
-    if (selected == 0)
-    { // Settings selected
-        // Set BUTTON3 and BUTTON4 to User1 state
-        if (ui_ButtonMidRight1)
+    if (selected == 0 || (selected == 5 && param.intensity == 1) || (selected == 3 && param.freq_cycling == 1))
+    { // Settings selected OR Interval Gap selected with intensity == 1
+        // Set BUTTON3 and BUTTON4 to User1 state and disable
+        if (button3 && selected == 0)
         {
-            lv_obj_clear_state(ui_ButtonMidRight1, LV_STATE_USER_2);
-            lv_obj_add_state(ui_ButtonMidRight1, LV_STATE_USER_1);
-            lv_obj_add_state(ui_ButtonMidRight1, LV_STATE_DISABLED);
+            lv_obj_clear_state(button3, LV_STATE_USER_1);
+            lv_obj_clear_state(button3, LV_STATE_DISABLED);
+            lv_obj_clear_state(button3, LV_STATE_USER_2);
+            lv_obj_add_state(button3, LV_STATE_USER_4);
         }
-        if (ui_ButtonRight1)
+        else{
+            lv_obj_clear_state(button3, LV_STATE_USER_1);
+            lv_obj_clear_state(button3, LV_STATE_USER_4);
+            lv_obj_add_state(button3, LV_STATE_USER_2);
+            lv_obj_add_state(button3, LV_STATE_DISABLED);
+        }
+        if (button4)
         {
-            lv_obj_clear_state(ui_ButtonRight1, LV_STATE_USER_2);
-            lv_obj_add_state(ui_ButtonRight1, LV_STATE_USER_1);
-            lv_obj_add_state(ui_ButtonRight1, LV_STATE_DISABLED);
+            lv_obj_clear_state(button4, LV_STATE_USER_1);
+            lv_obj_add_state(button4, LV_STATE_USER_2);
+            lv_obj_add_state(button4, LV_STATE_DISABLED);
         }
     }
     else
     { // Any other selection
-        // Set BUTTON3 and BUTTON4 to User2 state
-        if (ui_ButtonMidRight1)
+        // Set BUTTON3 and BUTTON4 to User2 state and enable
+        if (button3)
         {
-            lv_obj_clear_state(ui_ButtonMidRight1, LV_STATE_USER_1);
-            lv_obj_clear_state(ui_ButtonMidRight1, LV_STATE_DISABLED);
-            lv_obj_add_state(ui_ButtonMidRight1, LV_STATE_USER_2);
+            lv_obj_clear_state(button3, LV_STATE_USER_1);
+            lv_obj_clear_state(button3, LV_STATE_USER_4);
+            lv_obj_clear_state(button3, LV_STATE_DISABLED);
+            lv_obj_add_state(button3, LV_STATE_USER_2);
         }
-        if (ui_ButtonRight1)
+        if (button4)
         {
-            lv_obj_clear_state(ui_ButtonRight1, LV_STATE_USER_1);
-            lv_obj_clear_state(ui_ButtonRight1, LV_STATE_DISABLED);
-            lv_obj_add_state(ui_ButtonRight1, LV_STATE_USER_2);
+            lv_obj_clear_state(button4, LV_STATE_USER_1);
+            lv_obj_clear_state(button4, LV_STATE_DISABLED);
+            lv_obj_add_state(button4, LV_STATE_USER_2);
         }
     }
 
@@ -1645,6 +2058,14 @@ void updateParameterDisplay()
             lv_obj_add_flag(ui_Freq_Text1, LV_OBJ_FLAG_HIDDEN);
         if (ui_Freq_Value1)
             lv_obj_add_flag(ui_Freq_Value1, LV_OBJ_FLAG_HIDDEN);
+        if (ui_Freq_Text2)
+            lv_obj_add_flag(ui_Freq_Text2, LV_OBJ_FLAG_HIDDEN);
+        if (ui_Freq_Value2)
+            lv_obj_add_flag(ui_Freq_Value2, LV_OBJ_FLAG_HIDDEN);
+        if (ui_Freq_Text3)
+            lv_obj_add_flag(ui_Freq_Text3, LV_OBJ_FLAG_HIDDEN);
+        if (ui_Freq_Value3)
+            lv_obj_add_flag(ui_Freq_Value3, LV_OBJ_FLAG_HIDDEN);
     }
     else
     { // Other selections - show frequency display
@@ -1652,6 +2073,14 @@ void updateParameterDisplay()
             lv_obj_clear_flag(ui_Freq_Text1, LV_OBJ_FLAG_HIDDEN);
         if (ui_Freq_Value1)
             lv_obj_clear_flag(ui_Freq_Value1, LV_OBJ_FLAG_HIDDEN);
+        if (ui_Freq_Text2)
+            lv_obj_clear_flag(ui_Freq_Text2, LV_OBJ_FLAG_HIDDEN);
+        if (ui_Freq_Value2)
+            lv_obj_clear_flag(ui_Freq_Value2, LV_OBJ_FLAG_HIDDEN);
+        if (ui_Freq_Text3)
+            lv_obj_clear_flag(ui_Freq_Text3, LV_OBJ_FLAG_HIDDEN);
+        if (ui_Freq_Value3)
+            lv_obj_clear_flag(ui_Freq_Value3, LV_OBJ_FLAG_HIDDEN);
 
         // Update frequency display based on freq_cycling state
         if (param.freq_cycling)
@@ -1660,6 +2089,8 @@ void updateParameterDisplay()
                 lv_label_set_text(ui_Freq_Value1, "Cycle");
             if (ui_Freq_Value2)
                 lv_label_set_text(ui_Freq_Value2, "Cycle");
+            if (ui_Freq_Value3)
+                lv_label_set_text(ui_Freq_Value3, "Cycle");
         }
         else
         {
@@ -1668,6 +2099,8 @@ void updateParameterDisplay()
                 lv_label_set_text(ui_Freq_Value1, buffer);
             if (ui_Freq_Value2)
                 lv_label_set_text(ui_Freq_Value2, buffer);
+            if (ui_Freq_Value3)
+                lv_label_set_text(ui_Freq_Value3, buffer);
         }
     }
 
@@ -1676,6 +2109,10 @@ void updateParameterDisplay()
     case 0: // Settings
         if (ui_Label_Value1)
             lv_label_set_text(ui_Label_Value1, "---");
+        if (ui_Strength_Value1)
+            lv_label_set_text(ui_Strength_Value1, "---");
+        if (ui_Strength_Value2)
+            lv_label_set_text(ui_Strength_Value2, "---");
         arc_value = 0;
         break;
 
@@ -1685,40 +2122,89 @@ void updateParameterDisplay()
             lv_label_set_text(ui_Label_Value1, buffer);
         if (ui_Strength_Value1)
             lv_label_set_text(ui_Strength_Value1, buffer);
+        if (ui_Strength_Value2)
+            lv_label_set_text(ui_Strength_Value2, buffer);
         arc_value = (param.strength - STRENGTH_MIN) * 100 / (STRENGTH_MAX - STRENGTH_MIN);
         break;
 
     case 2: // Freq Cycle (0 or 1) -> ON/OFF display
         if (ui_Label_Value1)
             lv_label_set_text(ui_Label_Value1, param.freq_cycling ? "ON" : "OFF");
+        if (ui_Strength_Value1)
+            lv_label_set_text(ui_Strength_Value1, param.freq_cycling ? "ON" : "OFF");
+        if (ui_Strength_Value2)
+            lv_label_set_text(ui_Strength_Value2, param.freq_cycling ? "ON" : "OFF");
         arc_value = param.freq_cycling ? 100 : 0;
         break;
 
     case 3: // Frequency (15-350) -> Arc (0-100)
-        lv_snprintf(buffer, sizeof(buffer), "%d", param.base_freq);
-        if (ui_Label_Value1)
-            lv_label_set_text(ui_Label_Value1, buffer);
-        // Don't update Freq_Value1 here since it's hidden when frequency is selected
-        arc_value = (param.base_freq - FREQ_MIN) * 100 / (FREQ_MAX - FREQ_MIN);
+        if(param.freq_cycling == 1)
+        {
+            // Show Cycle when freq_cycling is ON
+            if (ui_Label_Value1)
+                lv_label_set_text(ui_Label_Value1, "Cyc");
+            if (ui_Strength_Value1)
+                lv_label_set_text(ui_Strength_Value1, "---");
+            if (ui_Strength_Value2)
+                lv_label_set_text(ui_Strength_Value2, "---");
+            arc_value = 100; // Full arc when cycling
+        }
+        else{
+            lv_snprintf(buffer, sizeof(buffer), "%d", param.base_freq);
+            if (ui_Label_Value1)
+                lv_label_set_text(ui_Label_Value1, buffer);
+            if (ui_Strength_Value1)
+                lv_label_set_text(ui_Strength_Value1, buffer);
+            if (ui_Strength_Value2)
+                lv_label_set_text(ui_Strength_Value2, buffer);
+            // Don't update Freq_Value1 here since it's hidden when frequency is selected
+            arc_value = (param.base_freq - FREQ_MIN) * 100 / (FREQ_MAX - FREQ_MIN);
+        }
         break;
 
     case 4: // Intensity (1-8) -> Arc (0-100)
         lv_snprintf(buffer, sizeof(buffer), "%d", param.intensity);
         if (ui_Label_Value1)
             lv_label_set_text(ui_Label_Value1, buffer);
+        if (ui_Strength_Value1)
+            lv_label_set_text(ui_Strength_Value1, buffer);
+        if (ui_Strength_Value2)
+            lv_label_set_text(ui_Strength_Value2, buffer);
         arc_value = (param.intensity - INTENSITY_MIN) * 100 / (INTENSITY_MAX - INTENSITY_MIN);
         break;
 
     case 5: // Interval Gap (10-80) -> Arc (0-100)
-        lv_snprintf(buffer, sizeof(buffer), "%d", param.interval_gap);
-        if (ui_Label_Value1)
-            lv_label_set_text(ui_Label_Value1, buffer);
-        arc_value = (param.interval_gap - Z_MIN) * 100 / (Z_MAX - Z_MIN);
+        if (param.intensity == 1)
+        {
+            // Show --- when intensity is 1
+            if (ui_Label_Value1)
+                lv_label_set_text(ui_Label_Value1, "---");
+            if (ui_Strength_Value1)
+                lv_label_set_text(ui_Strength_Value1, "---");
+            if (ui_Strength_Value2)
+                lv_label_set_text(ui_Strength_Value2, "---");
+            arc_value = 0;
+        }
+        else
+        {
+            lv_snprintf(buffer, sizeof(buffer), "%d", param.interval_gap);
+            if (ui_Label_Value1)
+                lv_label_set_text(ui_Label_Value1, buffer);
+            if (ui_Strength_Value1)
+                lv_label_set_text(ui_Strength_Value1, buffer);
+            if (ui_Strength_Value2)
+                lv_label_set_text(ui_Strength_Value2, buffer);
+            arc_value = (param.interval_gap - Z_MIN) * 100 / (Z_MAX - Z_MIN);
+        }
         break;
 
     case 6: // Filter (0 or 1) -> ON/OFF display
         if (ui_Label_Value1)
             lv_label_set_text(ui_Label_Value1, param.filter ? "ON" : "OFF");
+        if (ui_Strength_Value1)
+            lv_label_set_text(ui_Strength_Value1, param.filter ? "ON" : "OFF");
+        if (ui_Strength_Value2)
+            lv_label_set_text(ui_Strength_Value2, param.filter ? "ON" : "OFF");
         arc_value = param.filter ? 100 : 0;
         break;
 
@@ -1727,12 +2213,20 @@ void updateParameterDisplay()
         {
             if (ui_Label_Value1)
                 lv_label_set_text(ui_Label_Value1, "OFF");
+            if (ui_Strength_Value1)
+                lv_label_set_text(ui_Strength_Value1, "OFF");
+            if (ui_Strength_Value2)
+                lv_label_set_text(ui_Strength_Value2, "OFF");
         }
         else
         {
             lv_snprintf(buffer, sizeof(buffer), "%d", param.modulation);
             if (ui_Label_Value1)
                 lv_label_set_text(ui_Label_Value1, buffer);
+            if (ui_Strength_Value1)
+                lv_label_set_text(ui_Strength_Value1, buffer);
+            if (ui_Strength_Value2)
+                lv_label_set_text(ui_Strength_Value2, buffer);
         }
         arc_value = (param.modulation - MODULATION_MIN) * 100 / (MODULATION_MAX - MODULATION_MIN);
         break;
@@ -1740,6 +2234,10 @@ void updateParameterDisplay()
     default:
         if (ui_Label_Value1)
             lv_label_set_text(ui_Label_Value1, "---");
+        if (ui_Strength_Value1)
+            lv_label_set_text(ui_Strength_Value1, "---");
+        if (ui_Strength_Value2)
+            lv_label_set_text(ui_Strength_Value2, "---");
         arc_value = 0;
         break;
     }
@@ -1789,11 +2287,12 @@ void processButtonEvents()
             const char *name;
             lv_obj_t *main_btn;
             lv_obj_t *therapy_btn;
+            lv_obj_t *filter_btn;
         } buttons[] = {
-            {0, "BTN1", ui_ButtonLeft1, ui_ButtonLeft2},
-            {1, "BTN2", ui_ButtonMidLeft1, ui_ButtonMidLeft2},
-            {2, "BTN3", ui_ButtonMidRight1, ui_ButtonMidRight2},
-            {3, "BTN4", ui_ButtonRight1, ui_ButtonRight2}};
+            {0, "BTN1", ui_ButtonLeft1, ui_ButtonLeft2, ui_ButtonLeft3},
+            {1, "BTN2", ui_ButtonMidLeft1, ui_ButtonMidLeft2, ui_ButtonMidLeft3},
+            {2, "BTN3", ui_ButtonMidRight1, ui_ButtonMidRight2, ui_ButtonMidRight3},
+            {3, "BTN4", ui_ButtonRight1, ui_ButtonRight2, ui_ButtonRight3}};
 
         // Process each button for state changes
         for (int i = 0; i < 4; i++)
@@ -1808,11 +2307,11 @@ void processButtonEvents()
                 if (prev_state == 1 && curr_state == 0)
                 {
                     debugprintf("%s-PRESS on %s\n", buttons[i].name,
-                                (current_screen == ui_MainScreen) ? "MainScreen" : (current_screen == ui_TherapyScreen) ? "TherapyScreen"
-                                                                                                                        : "Unknown");
+                                (current_screen == ui_MainScreen) ? "MainScreen" :
+                                (current_screen == ui_TherapyScreen) ? "TherapyScreen" :
+                                (current_screen == ui_FilterScreen) ? "FilterScreen" : "Unknown");
 
-                    // Play beep for successful button press
-                    playBeep();
+                    
 
                     // Update button state tracking
                     button_states_tracker[i].is_pressed = true;
@@ -1829,31 +2328,82 @@ void processButtonEvents()
                         { // BUTTON1 - Roller UP
                             adjustRoller(ui_Roller_Topic1, true);
                             updateParameterDisplay(); // Update display after roller change
+                            playBeep();
                         }
                         else if (i == 1)
                         { // BUTTON2 - Roller DOWN
                             adjustRoller(ui_Roller_Topic1, false);
                             updateParameterDisplay(); // Update display after roller change
+                            playBeep();
                         }
                         else if (i == 2)
                         { // BUTTON3 - Increase Parameter
-                            adjustParameter(true);
+                            bool changed = adjustParameter(true, 1);
+                            if (!changed) beepLow(BEEP_DURATION); // Play low beep if hit limit
+                            else playBeep();
                         }
                         else if (i == 3)
                         { // BUTTON4 - Decrease Parameter
-                            adjustParameter(false);
+                            bool changed = adjustParameter(false, 1);
+                            if (!changed) beepLow(BEEP_DURATION); // Play low beep if hit limit
+                            else playBeep();
                         }
                     }
                     else if (current_screen == ui_TherapyScreen)
                     {
                         handleButtonPress(buttons[i].therapy_btn);
-                        if (i == 2)
+
+                        if (i == 0)
+                        { // BUTTON1 - Roller UP
+                            adjustRoller(ui_Roller_Topic2, true);
+                            updateParameterDisplay(); // Update display after roller change
+                            playBeep();
+                        }
+                        else if (i == 1)
+                        { // BUTTON2 - Roller DOWN
+                            adjustRoller(ui_Roller_Topic2, false);
+                            updateParameterDisplay(); // Update display after roller change
+                            playBeep();
+                        }
+                        else if (i == 2)
                         { // BUTTON3 - Increase Parameter
-                            adjustParameter(true);
+                            bool changed = adjustParameter(true, 1);
+                            if (!changed) beepLow(BEEP_DURATION); // Play low beep if hit limit
+                            else playBeep();
                         }
                         else if (i == 3)
                         { // BUTTON4 - Decrease Parameter
-                            adjustParameter(false);
+                            bool changed = adjustParameter(false, 1);
+                            if (!changed) beepLow(BEEP_DURATION); // Play low beep if hit limit
+                            else playBeep();
+                        }
+                    }
+                    else if (current_screen == ui_FilterScreen)
+                    {
+                        handleButtonPress(buttons[i].filter_btn);
+                        if (i == 0)
+                        { // BUTTON1 - Roller UP
+                            adjustRoller(ui_Roller_Topic3, true);
+                            updateParameterDisplay(); // Update display after roller change
+                            playBeep();
+                        }
+                        else if (i == 1)
+                        { // BUTTON2 - Roller DOWN
+                            adjustRoller(ui_Roller_Topic3, false);
+                            updateParameterDisplay(); // Update display after roller change
+                            playBeep();
+                        }
+                        else if (i == 2)
+                        { // BUTTON3 - Increase Parameter
+                            bool changed = adjustParameter(true, 1);
+                            if (!changed) beepLow(BEEP_DURATION); // Play low beep if hit limit
+                            else playBeep();
+                        }
+                        else if (i == 3)
+                        { // BUTTON4 - Decrease Parameter
+                            bool changed = adjustParameter(false, 1);
+                            if (!changed) beepLow(BEEP_DURATION); // Play low beep if hit limit
+                            else playBeep();
                         }
                     }
                 }
@@ -1862,8 +2412,9 @@ void processButtonEvents()
                 else if (prev_state == 0 && curr_state == 1)
                 {
                     debugprintf("%s-RELEASE on %s\n", buttons[i].name,
-                                (current_screen == ui_MainScreen) ? "MainScreen" : (current_screen == ui_TherapyScreen) ? "TherapyScreen"
-                                                                                                                        : "Unknown");
+                                (current_screen == ui_MainScreen) ? "MainScreen" :
+                                (current_screen == ui_TherapyScreen) ? "TherapyScreen" :
+                                (current_screen == ui_FilterScreen) ? "FilterScreen" : "Unknown");
 
                     // Update button state tracking
                     button_states_tracker[i].is_pressed = false;
@@ -1877,6 +2428,10 @@ void processButtonEvents()
                     {
                         handleButtonRelease(buttons[i].therapy_btn);
                     }
+                    else if (current_screen == ui_FilterScreen)
+                    {
+                        handleButtonRelease(buttons[i].filter_btn);
+                    }
                 }
             }
         }
@@ -1885,7 +2440,7 @@ void processButtonEvents()
         prev_states = current_states;
     }
 
-    // Handle auto-repeat for BUTTON3 and BUTTON4 (parameter adjustment buttons)
+    // Handle auto-repeat for all buttons on all screens
     lv_obj_t *current_screen = lv_scr_act();
     if (current_screen == ui_MainScreen)
     {
@@ -1893,8 +2448,8 @@ void processButtonEvents()
         uint16_t selected = ui_Roller_Topic1 ? lv_roller_get_selected(ui_Roller_Topic1) : 0;
         if (selected != 0)
         { // Not on Settings
-            for (int i = 2; i < 4; i++)
-            { // Only BUTTON3 and BUTTON4
+            for (int i = 0; i < 4; i++)
+            { // All buttons: BUTTON1, BUTTON2, BUTTON3, BUTTON4
                 if (button_states_tracker[i].is_pressed)
                 {
                     uint32_t hold_duration = current_time - button_states_tracker[i].press_start_time;
@@ -1916,15 +2471,33 @@ void processButtonEvents()
                         {
                             button_states_tracker[i].last_repeat_time = current_time;
 
-                            if (i == 2)
+                            // Determine step size based on total hold duration
+                            uint32_t time_in_auto_repeat = current_time - (button_states_tracker[i].press_start_time + AUTO_REPEAT_INITIAL_DELAY);
+                            uint8_t step = (time_in_auto_repeat >= AUTO_REPEAT_FAST_DELAY) ? 10 : 1;
+
+                            if (i == 0)
+                            { // BUTTON1 - Roller UP
+                                adjustRoller(ui_Roller_Topic1, true);
+                                updateParameterDisplay();
+                                playBeep();
+                            }
+                            else if (i == 1)
+                            { // BUTTON2 - Roller DOWN
+                                adjustRoller(ui_Roller_Topic1, false);
+                                updateParameterDisplay();
+                                playBeep();
+                            }
+                            else if (i == 2)
                             { // BUTTON3 - Increase Parameter
-                                playAutoRepeatHiBeep();// Play auto-repeat beep
-                                adjustParameter(true);
+                                bool changed = adjustParameter(true, step);
+                                if (changed) playAutoRepeatHiBeep();
+                                else beepLow(BEEP_AUTOREPEAT_DURATION);
                             }
                             else if (i == 3)
                             { // BUTTON4 - Decrease Parameter
-                                playAutoRepeatLoBeep();// Play auto-repeat beep
-                                adjustParameter(false);
+                                bool changed = adjustParameter(false, step);
+                                if (changed) playAutoRepeatLoBeep();
+                                else beepLow(BEEP_AUTOREPEAT_DURATION);
                             }
                         }
                     }
@@ -1934,9 +2507,9 @@ void processButtonEvents()
     }
     else if (current_screen == ui_TherapyScreen)
     {
-        // Handle auto-repeat for therapy screen strength adjustment
-        for (int i = 2; i < 4; i++)
-        { // Only BUTTON3 and BUTTON4
+        // Handle auto-repeat for therapy screen
+        for (int i = 0; i < 4; i++)
+        { // All buttons: BUTTON1, BUTTON2, BUTTON3, BUTTON4
             if (button_states_tracker[i].is_pressed)
             {
                 uint32_t hold_duration = current_time - button_states_tracker[i].press_start_time;
@@ -1958,16 +2531,92 @@ void processButtonEvents()
                     {
                         button_states_tracker[i].last_repeat_time = current_time;
 
+                        // Determine step size based on total hold duration
+                        uint32_t time_in_auto_repeat = current_time - (button_states_tracker[i].press_start_time + AUTO_REPEAT_INITIAL_DELAY);
+                        uint8_t step = (time_in_auto_repeat >= AUTO_REPEAT_FAST_DELAY) ? 10 : 1;
 
-                        if (i == 2)
+                        if (i == 0)
+                        { // BUTTON1 - Roller UP
+                            adjustRoller(ui_Roller_Topic2, true);
+                            updateParameterDisplay();
+                            playBeep();
+                        }
+                        else if (i == 1)
+                        { // BUTTON2 - Roller DOWN
+                            adjustRoller(ui_Roller_Topic2, false);
+                            updateParameterDisplay();
+                            playBeep();
+                        }
+                        else if (i == 2)
                         { // BUTTON3 - Increase Parameter
-                            playAutoRepeatHiBeep();// Play auto-repeat beep
-                            adjustParameter(true);
+                            bool changed = adjustParameter(true, step);
+                            if (changed) playAutoRepeatHiBeep();
+                            else beepLow(BEEP_AUTOREPEAT_DURATION);
                         }
                         else if (i == 3)
                         { // BUTTON4 - Decrease Parameter
-                            playAutoRepeatLoBeep();// Play auto-repeat beep
-                            adjustParameter(false);
+                            bool changed = adjustParameter(false, step);
+                            if (changed) playAutoRepeatLoBeep();
+                            else beepLow(BEEP_AUTOREPEAT_DURATION);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else if (current_screen == ui_FilterScreen)
+    {
+        // Handle auto-repeat for filter screen
+        for (int i = 0; i < 4; i++)
+        { // All buttons: BUTTON1, BUTTON2, BUTTON3, BUTTON4
+            if (button_states_tracker[i].is_pressed)
+            {
+                uint32_t hold_duration = current_time - button_states_tracker[i].press_start_time;
+
+                // Check if we should start auto-repeat
+                if (!button_states_tracker[i].auto_repeating && hold_duration >= AUTO_REPEAT_INITIAL_DELAY)
+                {
+                    button_states_tracker[i].auto_repeating = true;
+                    button_states_tracker[i].last_repeat_time = current_time;
+                    debugprintf("Auto-repeat started for BTN%d on FilterScreen\n", i + 1);
+                }
+
+                // Process auto-repeat
+                if (button_states_tracker[i].auto_repeating)
+                {
+                    uint32_t time_since_last_repeat = current_time - button_states_tracker[i].last_repeat_time;
+
+                    if (time_since_last_repeat >= AUTO_REPEAT_INTERVAL)
+                    {
+                        button_states_tracker[i].last_repeat_time = current_time;
+
+                        // Determine step size based on total hold duration
+                        uint32_t time_in_auto_repeat = current_time - (button_states_tracker[i].press_start_time + AUTO_REPEAT_INITIAL_DELAY);
+                        uint8_t step = (time_in_auto_repeat >= AUTO_REPEAT_FAST_DELAY) ? 10 : 1;
+
+                        if (i == 0)
+                        { // BUTTON1 - Roller UP
+                            adjustRoller(ui_Roller_Topic3, true);
+                            updateParameterDisplay();
+                            playBeep();
+                        }
+                        else if (i == 1)
+                        { // BUTTON2 - Roller DOWN
+                            adjustRoller(ui_Roller_Topic3, false);
+                            updateParameterDisplay();
+                            playBeep();
+                        }
+                        else if (i == 2)
+                        { // BUTTON3 - Increase Parameter
+                            bool changed = adjustParameter(true, step);
+                            if (changed) playAutoRepeatHiBeep();
+                            else beepLow(BEEP_AUTOREPEAT_DURATION);
+                        }
+                        else if (i == 3)
+                        { // BUTTON4 - Decrease Parameter
+                            bool changed = adjustParameter(false, step);
+                            if (changed) playAutoRepeatLoBeep();
+                            else beepLow(BEEP_AUTOREPEAT_DURATION);
                         }
                     }
                 }
@@ -2008,7 +2657,7 @@ void beepLow(int duration)
 {
     // Generate low frequency beep using tone() if available
     // or use PWM for lower frequency
-    tone(PIEZO_PIN, 1000, duration); // 500 Hz low tone
+    tone(PIEZO_PIN, 500, duration); // 500 Hz low tone
 }
 
 void beepPeriodic(int duration, int period)

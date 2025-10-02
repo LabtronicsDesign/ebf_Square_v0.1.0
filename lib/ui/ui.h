@@ -35,9 +35,9 @@ LV_IMG_DECLARE( ui_img_732690875);   // assets/triangle-left.png
 LV_IMG_DECLARE( ui_img_33364130);   // assets/triangle-down.png
 LV_IMG_DECLARE( ui_img_1713356312);   // assets/tick-icon.png
 LV_IMG_DECLARE( ui_img_548664401);   // assets/plus-icon.png
+LV_IMG_DECLARE( ui_img_719203222);   // assets/triangle-right.png
 LV_IMG_DECLARE( ui_img_1546845897);   // assets/cross-icon.png
 LV_IMG_DECLARE( ui_img_1759250347);   // assets/minus-icon.png
-LV_IMG_DECLARE( ui_img_719203222);   // assets/triangle-right.png
 LV_IMG_DECLARE( ui_img_battery_low_png);   // assets/battery low.png
 LV_IMG_DECLARE( ui_img_battery_discharge_png);   // assets/battery discharge.png
 LV_IMG_DECLARE( ui_img_battery_full_png);   // assets/battery full.png
